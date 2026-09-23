@@ -1,0 +1,37 @@
+# Accepted findings for phase 1. The reason for each is recorded in
+# docs/implementation-plan.md, section 9 (security), and revisited before phase 2.
+framework:
+  - terraform
+skip-path:
+  - lambda/node_modules
+skip-check:
+  # Not applicable to this design
+  - CKV_AWS_116   # Lambda DLQ: functions are invoked synchronously / by SQS ESM; the queues own the DLQs
+  - CKV_AWS_120   # API Gateway caching: webhooks must never be served from a cache
+  - CKV_AWS_225   # API Gateway method caching: same as above
+  - CKV2_AWS_51   # API Gateway client certificates: backend is Lambda, not an HTTP origin
+  - CKV2_AWS_53   # API Gateway request validation: the ingest Lambda validates with Effect Schema
+  - CKV_AWS_173   # Lambda env encryption: environment holds no secrets (IDs / ARNs only)
+  - CKV_AWS_378   # HTTP target groups: TLS terminates at the internal ALB inside the VPC
+  - CKV2_AWS_19   # EIPs are attached to the Regional NAT Gateway (not EC2)
+  - CKV2_AWS_5    # Dispatcher SG is attached to the Lambda function in the same root
+  - CKV_AWS_109   # KMS key policy: standard account-root statement
+  - CKV_AWS_111   # KMS key policy: standard account-root statement
+  - CKV_AWS_356   # KMS key policy: "*" resource means "this key" in key policies
+  - CKV_AWS_144   # S3 cross-region replication of the state bucket: phase 3 decision (Osaka)
+  - CKV2_AWS_62   # S3 event notifications: not needed for the state bucket
+  # Deferred (phase 2 hardening backlog)
+  - CKV_AWS_158   # CloudWatch Logs CMK encryption
+  - CKV_AWS_338   # 1-year log retention (90 days chosen; revisit with audit requirements)
+  - CKV_AWS_149   # Secrets Manager CMK
+  - CKV2_AWS_57   # Secret rotation (write-only versions are rotated by bumping secret_version)
+  - CKV_AWS_191   # ElastiCache CMK
+  - CKV_AWS_354   # Performance Insights CMK
+  - CKV_AWS_18    # S3 access logging (state bucket; CloudTrail data events instead)
+  - CKV_AWS_91    # ALB access logging
+  - CKV_AWS_272   # Lambda code signing
+  - CKV2_AWS_77   # WAF Log4j rule set in BLOCK mode (managed rules run in COUNT, see alert_ingress)
+  - CKV_AWS_192   # same as above
+  # Open item (Keep Redis TLS support unverified)
+  - CKV_AWS_30    # ElastiCache in-transit encryption
+  - CKV_AWS_31    # ElastiCache in-transit encryption with auth token

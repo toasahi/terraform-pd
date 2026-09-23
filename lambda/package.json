@@ -1,0 +1,30 @@
+{
+  "name": "alert-pipeline-lambda",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Alert pipeline Lambda functions (authorizer / ingest / router / dispatcher) on the Node.js 24 runtime",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1138.0",
+    "@aws-sdk/client-secrets-manager": "^3.1138.0",
+    "@aws-sdk/client-sns": "^3.1138.0",
+    "@aws-sdk/client-sqs": "^3.1138.0",
+    "effect": "^3.22.2"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.163",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.1"
+  }
+}
