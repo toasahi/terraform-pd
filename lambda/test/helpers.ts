@@ -1,6 +1,6 @@
 import { ConfigProvider, Effect, Layer } from "effect"
 import { Journal, type JournalEntry, type JournalShape, type JournalState, JournalStates } from "../src/lib/journal.ts"
-import type { FifoMessage, QueueShape } from "../src/lib/queue.ts"
+import type { QueueMessage, QueueShape } from "../src/lib/queue.ts"
 import { Queue } from "../src/lib/queue.ts"
 import { Notifier } from "../src/lib/notifier.ts"
 import type { AlertmanagerAlert } from "../src/lib/schema.ts"
@@ -31,13 +31,16 @@ export const webhook = (alerts: ReadonlyArray<AlertmanagerAlert>) => ({
 
 /** In-memory Journal with the same forward-only semantics as the DynamoDB implementation. */
 export const makeMemoryJournal = () => {
-  const items = new Map<string, JournalEntry & { state: JournalState; attributes: Record<string, string> }>()
+  const items = new Map<
+    string,
+    JournalEntry & { state: JournalState; attributes: Record<string, string>; channels: Set<string> }
+  >()
   const service: JournalShape = {
     putReceived: (entry) =>
       Effect.sync(() => {
         const existing = items.get(entry.transitionId)
         if (existing) return { _tag: "Exists", state: existing.state } as const
-        items.set(entry.transitionId, { ...entry, state: "RECEIVED", attributes: {} })
+        items.set(entry.transitionId, { ...entry, state: "RECEIVED", attributes: {}, channels: new Set() })
         return { _tag: "Created" } as const
       }),
     advance: (id, state, attributes = {}) =>
@@ -48,12 +51,14 @@ export const makeMemoryJournal = () => {
           Object.assign(item.attributes, attributes)
         }
       }),
+    deliveredChannels: (id) => Effect.sync(() => new Set(items.get(id)?.channels ?? [])),
+    markChannelDelivered: (id, channel) => Effect.sync(() => void items.get(id)?.channels.add(channel)),
   }
   return { items, layer: Layer.succeed(Journal, service) }
 }
 
-export const makeMemoryQueue = (failOn?: (message: FifoMessage) => boolean) => {
-  const sent: FifoMessage[] = []
+export const makeMemoryQueue = (failOn?: (message: QueueMessage) => boolean) => {
+  const sent: QueueMessage[] = []
   const service: QueueShape = {
     send: (message) =>
       failOn?.(message)
@@ -63,12 +68,15 @@ export const makeMemoryQueue = (failOn?: (message: FifoMessage) => boolean) => {
   return { sent, layer: Layer.succeed(Queue, service) }
 }
 
-export const makeMemoryNotifier = () => {
+export const makeMemoryNotifier = (fail: () => boolean = () => false) => {
   const published: Array<{ topicArn: string; subject: string; message: string }> = []
   return {
     published,
     layer: Layer.succeed(Notifier, {
-      publish: (topicArn, subject, message) => Effect.sync(() => void published.push({ topicArn, subject, message })),
+      publish: (topicArn, subject, message) =>
+        fail()
+          ? Effect.fail({ _tag: "AwsError", operation: "sns:Publish", cause: "boom" } as never)
+          : Effect.sync(() => void published.push({ topicArn, subject, message })),
     }),
   }
 }

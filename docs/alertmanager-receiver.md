@@ -55,7 +55,7 @@ receivers:
 ```
 
 - `send_resolved: true` にします。resolved は別の transition_id として記録されます。
-- ラベル `severity` の値が `critical_severities`（既定は `critical`）に含まれるアラートは、Keep を経由せず SNS の critical-direct にも送られます。
+- ラベル `severity` の値が `critical_severities`（既定は `critical`）に含まれるアラートは、Keep を経由せず、内製ツール（SQS 経由）と SNS の critical-direct の 2 経路にも常時送られます（[`critical-notification-contract.md`](critical-notification-contract.md)）。
 - 受信側は webhook ペイロード v4 を Schema で検証します。形式が不正なら 400 を返します（再試行されません）。`alert-pipeline-api-client-errors` アラームで検知します。
 
 ## 4. 疎通確認

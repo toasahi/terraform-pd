@@ -19,8 +19,18 @@ output "queue_urls" {
 }
 
 output "critical_topic_arn" {
-  description = "SNS topic for Keep-independent critical notifications."
+  description = "SNS topic for Keep-independent critical notifications (parallel channel)."
   value       = aws_sns_topic.critical.arn
+}
+
+output "inhouse_notifier_queue_arn" {
+  description = "Queue the in-house notifier Lambda consumes (event source mapping + sqs:ReceiveMessage/DeleteMessage/GetQueueAttributes on the tool's role)."
+  value       = local.inhouse_queue_arn
+}
+
+output "inhouse_notifier_queue_url" {
+  description = "URL of the in-house notifier queue."
+  value       = local.inhouse_queue_url
 }
 
 output "alarm_topic_arn" {

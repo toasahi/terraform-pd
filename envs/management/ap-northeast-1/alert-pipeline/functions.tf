@@ -81,12 +81,27 @@ data "aws_iam_policy_document" "router" {
   }
 
   statement {
+    actions   = ["sqs:SendMessage"]
+    resources = [local.inhouse_queue_arn]
+  }
+
+  dynamic "statement" {
+    for_each = var.inhouse_notifier_kms_key_arn == null ? [] : [var.inhouse_notifier_kms_key_arn]
+
+    content {
+      actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+      resources = [statement.value]
+    }
+  }
+
+  statement {
     actions   = ["sns:Publish"]
     resources = [aws_sns_topic.critical.arn]
   }
 
+  # GetItem: channels already delivered (retries only re-send the failed channel).
   statement {
-    actions   = ["dynamodb:UpdateItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [module.journal.table_arn]
   }
 }
@@ -95,17 +110,18 @@ module "router" {
   source = "../../../../modules/nodejs_lambda_function"
 
   function_name   = "${local.name}-router"
-  description     = "Sends critical alerts directly and forwards all alerts to keep-delivery.fifo"
+  description     = "Delivers critical alerts to the in-house notifier and SNS, forwards all alerts to keep-delivery.fifo"
   handler         = "index.router"
   package_path    = local.lambda_package_path
   timeout_seconds = local.function_timeouts_seconds.router
   policy_json     = data.aws_iam_policy_document.router.json
 
   environment_variables = {
-    JOURNAL_TABLE_NAME      = module.journal.table_name
-    CRITICAL_TOPIC_ARN      = aws_sns_topic.critical.arn
-    CRITICAL_SEVERITIES     = join(",", var.critical_severities)
-    KEEP_DELIVERY_QUEUE_URL = module.queues.queue_urls["keep_delivery"]
+    JOURNAL_TABLE_NAME         = module.journal.table_name
+    CRITICAL_TOPIC_ARN         = aws_sns_topic.critical.arn
+    INHOUSE_NOTIFIER_QUEUE_URL = local.inhouse_queue_url
+    CRITICAL_SEVERITIES        = join(",", var.critical_severities)
+    KEEP_DELIVERY_QUEUE_URL    = module.queues.queue_urls["keep_delivery"]
   }
 }
 

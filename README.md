@@ -7,6 +7,7 @@ PagerDuty から Keep への置き換えのうち、**フェーズ 1（東京 MV
 
 - 計画書・前提確認・最終裁定：[`docs/implementation-plan.md`](docs/implementation-plan.md)
 - 送信元（本番 / 管理 EKS）の設定：[`docs/alertmanager-receiver.md`](docs/alertmanager-receiver.md)
+- critical アラートの直送（内製ツール / SNS）の契約：[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)
 
 ## 構成
 
@@ -25,7 +26,7 @@ envs/management/ap-northeast-1/ ルートモジュール（provider とバージ
   bootstrap/                   tfstate 用 S3 バケット
   foundation/                  network + container_registry
   keep/                        keep_platform
-  alert-pipeline/              Journal、キュー、Lambda ×4、ingress、SNS、監視
+  alert-pipeline/              Journal、キュー（内製ツール用を含む）、Lambda ×4、ingress、SNS、監視
 lambda/                        TypeScript + Effect（Node.js 24、pnpm、esbuild、vitest）
 helpers/                       build-lambda.sh、mirror-keep-images.sh
 ```
@@ -58,7 +59,8 @@ helpers/                       build-lambda.sh、mirror-keep-images.sh
 5. **Keep API キー**：Keep の UI で発行し、`aws secretsmanager put-secret-value --secret-id keep/api-key-dispatcher --secret-string <key>` で保存します。
 6. **Lambda のビルド**：`helpers/build-lambda.sh` で `lambda/dist/lambda.zip` を作ります（未ビルドのまま plan すると precondition でエラーになります）。
 7. **alert-pipeline**：`terraform apply`。
-8. **送信元の登録**：[`docs/alertmanager-receiver.md`](docs/alertmanager-receiver.md) の手順で、トークンの digest 登録と Alertmanager の receiver 追加を行います。
+8. **内製ツールの接続**：出力 `inhouse_notifier_queue_arn` を内製ツール Lambda のイベントソースに設定します（[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)）。
+9. **送信元の登録**：[`docs/alertmanager-receiver.md`](docs/alertmanager-receiver.md) の手順で、トークンの digest 登録と Alertmanager の receiver 追加を行います。
 
 ## 開発と検証
 

@@ -87,6 +87,48 @@ run "pipeline_wiring" {
   }
 }
 
+run "inhouse_notifier_queue_created_by_default" {
+  command = plan
+
+  assert {
+    condition     = module.queues.queue_names["critical_inhouse"] == "alert-pipeline-critical-inhouse.fifo"
+    error_message = "A FIFO queue for the in-house notifier must be created by default."
+  }
+
+  assert {
+    condition     = contains(keys(module.queues.dead_letter_queue_names), "critical_inhouse")
+    error_message = "The in-house notifier queue needs a DLQ (tool-side failures)."
+  }
+}
+
+run "existing_inhouse_notifier_queue" {
+  command = plan
+
+  variables {
+    inhouse_notifier_existing_queue_arn = "arn:aws:sqs:ap-northeast-1:111111111111:inhouse-notifier.fifo"
+  }
+
+  assert {
+    condition     = !contains(keys(module.queues.queue_names), "critical_inhouse")
+    error_message = "No queue must be created when the tool's existing queue is used."
+  }
+
+  assert {
+    condition     = output.inhouse_notifier_queue_url == "https://sqs.ap-northeast-1.amazonaws.com/111111111111/inhouse-notifier.fifo"
+    error_message = "The queue URL must be derived from the existing queue ARN."
+  }
+}
+
+run "rejects_invalid_inhouse_queue_arn" {
+  command = plan
+
+  variables {
+    inhouse_notifier_existing_queue_arn = "arn:aws:sns:ap-northeast-1:111111111111:topic"
+  }
+
+  expect_failures = [var.inhouse_notifier_existing_queue_arn]
+}
+
 run "rejects_reserved_concurrency_below_maximum" {
   command = plan
 

@@ -34,22 +34,44 @@ variable "alert_sources" {
 }
 
 variable "critical_severities" {
-  description = "Alert severities (labels.severity) delivered directly via SNS, independent of Keep."
+  description = "Alert severities (labels.severity) delivered to the in-house notifier and SNS, independent of Keep."
   type        = list(string)
   default     = ["critical"]
 }
 
 variable "critical_email_endpoints" {
-  description = "E-mail subscribers of the critical-direct topic."
+  description = "E-mail subscribers of the critical-direct SNS topic (the channel parallel to the in-house notifier)."
   type        = list(string)
   default     = []
 }
 
-variable "critical_https_endpoints" {
-  description = "HTTPS subscribers of the critical-direct topic (e.g. a PagerDuty Amazon SNS integration URL during the parallel run)."
-  type        = list(string)
-  default     = []
-  sensitive   = true
+variable "inhouse_notifier_existing_queue_arn" {
+  description = "SQS queue already watched by the in-house notifier Lambda. null creates <name>-critical-inhouse.fifo here for the tool to consume."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.inhouse_notifier_existing_queue_arn == null || can(regex("^arn:aws:sqs:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+(\\.fifo)?$", var.inhouse_notifier_existing_queue_arn))
+    error_message = "inhouse_notifier_existing_queue_arn must be an SQS queue ARN."
+  }
+}
+
+variable "inhouse_notifier_kms_key_arn" {
+  description = "Customer managed KMS key of the existing in-house notifier queue (SSE-KMS), so the router can send to it. null when the queue uses SSE-SQS."
+  type        = string
+  default     = null
+}
+
+variable "inhouse_notifier_visibility_timeout_seconds" {
+  description = "Visibility timeout of the queue created for the in-house notifier; at least 6x the tool Lambda's timeout."
+  type        = number
+  default     = 900
+}
+
+variable "inhouse_notifier_max_oldest_message_seconds" {
+  description = "Age of the oldest unconsumed critical notification that raises an alarm (the in-house notifier is not consuming)."
+  type        = number
+  default     = 120
 }
 
 variable "alarm_email_endpoints" {

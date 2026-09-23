@@ -2,6 +2,7 @@
 
 - 作成日: 2026-09-23
 - 対象: `pagerduty_to_keep_architecture_review_v4.md`（v4 に対するレビュー、裁定「条件付き Go」）
+  - v4 本文（`pagerduty_to_keep_architecture_summary_v4.md`）は未入手。v4 の節番号はレビューに書かれている引用に基づく（§14 U9）
 - 対象範囲: **フェーズ 1（東京 MVP）の IaC**。大阪 DR（フェーズ 3）は「後から変えない前提」の担保のみを行う
 - 方針
   - 推論ではなく一次情報源（公式ドキュメント、公式リポジトリのソースコード、パッケージレジストリ）で前提を裏取りする。
@@ -58,10 +59,11 @@
 ┌──────────────── 本番アカウント ────────────────┐   ┌─────────── 管理アカウント (ap-northeast-1) ───────────┐
 │ EKS  ─ Alertmanager ─(NAT 固定 EIP)────────────┼──▶│ Route53 alerts.<zone> → API GW REST + WAF          │
 └────────────────────────────────────────────────┘   │   → authorizer λ → ingest λ → Journal / alerts.fifo  │
-┌──────────────── 管理アカウント ────────────────┐   │   → router λ ─┬→ SNS critical-direct（Keep 非依存）│
-│ EKS  ─ Alertmanager ─(NAT 固定 EIP)────────────┼──▶│               └→ keep-delivery.fifo               │
-└────────────────────────────────────────────────┘   │   → dispatcher λ(VPC) → internal ALB → Keep(ECS)    │
-  開発 / ステージング: 送信しない                     │   Keep: RDS PostgreSQL / ElastiCache Valkey          │
+┌──────────────── 管理アカウント ────────────────┐   │   → router λ ─┬→ 内製ツール用 SQS → 内製ツール λ  │
+│ EKS  ─ Alertmanager ─(NAT 固定 EIP)────────────┼──▶│               ├→ SNS critical-direct（メール等） │
+└────────────────────────────────────────────────┘   │               └→ keep-delivery.fifo               │
+  開発 / ステージング: 送信しない                     │   → dispatcher λ(VPC) → internal ALB → Keep(ECS)    │
+                                                      │   Keep: RDS PostgreSQL / ElastiCache Valkey          │
                                                       └──────────────────────────────────────────────────────┘
 ```
 
@@ -82,7 +84,10 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
       alerts.fifo へ SendMessage（group=<source>:<fingerprint>, dedup=transition_id）→ state=QUEUED
       内部失敗は 500（Alertmanager が再送する。RECEIVED のまま残ったものは再送時に再キューイング）
   → router λ（alerts.fifo, ESM max 10）
-      severity ∈ critical_severities → SNS critical-direct（メール、PagerDuty SNS 連携 URL など）
+      severity ∈ critical_severities → Keep 非依存の 2 経路に常時並行で送る（§4.1）
+        ① 内製ツール用 SQS（既定 critical-inhouse.fifo, group=fingerprint, dedup=transition_id）→ 内製ツール λ
+        ② SNS critical-direct（メール購読。Slack 連携なども後から購読追加できる）
+        経路ごとに成功を Journal の delivered_channels に記録し、再試行では未送信の経路だけを送る
       全件を keep-delivery.fifo へ → state=ROUTED
   → dispatcher λ（keep-delivery.fifo, VPC 内, ESM max 3, 予約同時実行数 3）
       POST https://keep-api.<zone>/alerts/event/prometheus?fingerprint=<source>:<fp>（X-API-KEY）
@@ -93,6 +98,21 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 - **FIFO の部分失敗**: 最初に失敗したメッセージ以降はバッチ内をすべて失敗として返す（`ReportBatchItemFailures`）。これでメッセージグループ内の順序を保つ。
 - **DLQ**: `maxReceiveCount` は 5。可視性タイムアウトは消費側 Lambda のタイムアウトの 6 倍。
 - **再処理**: Journal の GSI `state-updated_at` で、`KEEP_ACCEPTED` 未満のまま一定時間が過ぎたものを抽出する。payload は Journal に保存してあるので keep-delivery.fifo に再投入できる。
+
+### 4.1 critical アラートの直送経路（内製ツールと SNS）
+
+前提：内製ツールは管理アカウントの Lambda で、監視している SQS にメッセージが入ると起動する。PagerDuty の SNS 連携は選択肢にない。SNS と内製ツールの両方に常時送る。
+
+| 案 | 構成 | 評価 |
+|---|---|---|
+| **A（採用）** | router が内製ツール用 SQS への SendMessage と SNS への Publish を**別々に**行う。経路ごとの成功を Journal に記録する | 2 経路が互いに独立する（SNS が落ちても内製ツールには届き、その逆も同じ）<br>内製ツールのキューを FIFO にでき、アラート単位の順序（firing → resolved）を保てる<br>再試行時は失敗した経路だけを送り直す |
+| B | router は SNS に 1 回だけ Publish し、SNS から内製ツールの SQS（raw 配信）とメールへファンアウトする | 呼び出しは 1 回で済むが、両経路が SNS に依存し「並行経路」にならない<br>SNS FIFO トピックはメールに配信できないため、標準トピックになりアラート単位の順序が失われる |
+| C | Keep のワークフロー（amazonsqs アクション）から内製ツールのキューに送る | critical 配送が Keep に依存する。レビュー 3.6 の「critical 直送」の原則に反する |
+| D | EventBridge API Destination | 内製ツールは HTTP ではなく SQS で起動するため当てはまらない |
+
+- 配送は各経路とも at-least-once で、受け手は `transitionId` で重複を除く。送信成功から Journal への記録までの間に障害が起きると再送されるが、取りこぼしよりは重複を選ぶ。
+- 契約（JSON スキーマ、内製ツール側の ESM と IAM の設定）は [`critical-notification-contract.md`](critical-notification-contract.md) にまとめた。
+- 内製ツール用キューは既定で本リポジトリが作る（FIFO + DLQ）。ツールがすでに監視しているキューがあれば、`inhouse_notifier_existing_queue_arn` でそちらに送る。標準キューと FIFO キューの両方に対応し、SSE-KMS なら `inhouse_notifier_kms_key_arn` も渡す。
 
 ## 5. Terraform の設計方針（ベストプラクティスとの対応）
 
@@ -138,7 +158,8 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 | 2 | （手作業） | `helpers/mirror-keep-images.sh` で Keep イメージをミラーし、digest を控える | foundation |
 | 3 | `keep` | `keep_platform` | foundation |
 | 4 | （手作業） | Keep で API キーを発行し、`keep/api-key-dispatcher` に保存する | keep |
-| 5 | `alert-pipeline` | Journal、キュー、Lambda ×4、ingress、SNS、監視 | foundation、keep、`lambda/dist/lambda.zip` |
+| 5 | `alert-pipeline` | Journal、キュー（内製ツール用を含む）、Lambda ×4、ingress、SNS、監視 | foundation、keep、`lambda/dist/lambda.zip` |
+| 5a | （内製ツール側） | 出力 `inhouse_notifier_queue_arn` を内製ツール Lambda のイベントソースに設定し、実行ロールに受信権限を付ける | alert-pipeline |
 | 6 | （手作業） | 送信元トークンの digest を `alert-pipeline/source-token-digests` に保存し、Alertmanager に receiver を追加する | alert-pipeline |
 
 ## 7. Lambda の設計（`lambda/`）
@@ -151,8 +172,8 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 | ビルド | esbuild で ESM バンドルを 1 つ作る（`dist/index.mjs`、約 1MB）。AWS SDK v3 も同梱し、ロックファイルでバージョンを固定する。zip は mtime を固定して再現可能にしてあり、コードが同じなら `source_code_hash` も変わらない |
 | エントリ | `src/index.ts` が `authorizer`、`ingest`、`router`、`dispatcher` を export する（Lambda の handler は `index.<name>`） |
 | ハンドララッパー | `src/runtime/handler.ts`：Layer から `ManagedRuntime` を初回呼び出し時に 1 回だけ作る。失敗はログに出してから reject し、Lambda の失敗として記録させる |
-| サービス | `Journal`（DynamoDB、状態は前進のみ）、`Queue`（SQS FIFO）、`Notifier`（SNS）、`Secrets`（Cache TTL 5 分）、`KeepClient`（fetch、タイムアウト 10 秒）。いずれも `Context.Tag` + `Layer` で、テストではインメモリの Layer に差し替える |
-| テスト | vitest 5。6 ファイル 25 件：transition_id、FIFO の部分失敗、オーソライザ、Ingest（再送、5xx、400、403）、Router と Dispatcher、ハンドララッパー |
+| サービス | `Journal`（DynamoDB、状態は前進のみ）、`Queue`（SQS。FIFO なら group と dedup を付ける）、`Notifier`（SNS）、`criticalNotification`（内製ツールと SNS 向けの契約 JSON、`schemaVersion: 1`）、`Secrets`（Cache TTL 5 分）、`KeepClient`（fetch、タイムアウト 10 秒）。いずれも `Context.Tag` + `Layer` で、テストではインメモリの Layer に差し替える |
+| テスト | vitest 5。7 ファイル 29 件：transition_id、FIFO の部分失敗、オーソライザ、Ingest（再送、5xx、400、403）、Router（内製ツールと SNS の 2 経路、失敗した経路だけを再送）、Dispatcher、critical 通知の契約、ハンドララッパー |
 
 ## 8. Keep の設計（`keep_platform`）
 
@@ -189,7 +210,8 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 
 | 対象 | 条件 | 意味 |
 |---|---|---|
-| DLQ ×2 | 可視メッセージ > 0 | 配送不能。調査のうえ `StartMessageMoveTask` で redrive する |
+| DLQ ×3（alerts / keep-delivery / critical-inhouse） | 可視メッセージ > 0 | 配送不能。調査のうえ `StartMessageMoveTask` で redrive する（critical-inhouse の DLQ は内製ツール側の処理失敗） |
+| critical-inhouse キュー | 最古メッセージの経過時間 > 120 秒 | 内製ツールが消費していない。この間 critical は SNS 経路だけで届いている |
 | alerts.fifo / keep-delivery.fifo | 最古メッセージの経過時間 > 300 秒 / 900 秒 | 消費が停止している（Keep の停止など） |
 | Lambda ×4 | Errors > 0 | ハンドラの失敗 |
 | dispatcher | Throttles > 0 | 予約同時実行数の不足 |
@@ -209,6 +231,7 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 | 6 | foundation の apply、イメージのミラー、keep の apply | VPC、ECR、Keep | 未着手（実環境） |
 | 7 | Keep の初期設定（管理者、API キー、prometheus プロバイダ、heartbeat ワークフロー） | Keep | 未着手（実環境） |
 | 8 | alert-pipeline の apply、トークン digest の投入 | 受信口 | 未着手（実環境） |
+| 8a | 内製ツール Lambda に critical キューのイベントソースと IAM を設定し、`transitionId` で重複を除く | `docs/critical-notification-contract.md` | 未着手（内製ツール側） |
 | 9 | 本番 EKS と管理 EKS の Alertmanager に receiver を追加（PagerDuty との並行運用） | `docs/alertmanager-receiver.md` | 未着手（実環境） |
 | 10 | CI への plan ジョブ追加（GitHub OIDC → 管理アカウントの plan 専用ロール） | CI | 未着手 |
 | 11 | フェーズ 1 の完了条件の検証と GameDay（§12） | 検証記録 | 未着手 |
@@ -221,7 +244,7 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 |---|---|---|
 | 6 | Keep API を 2 タスクで動かし、interval ワークフロー（Keep processing heartbeat）が 1 周期に 1 回だけ実行される | 24 時間分の実行履歴を数える。2 回実行されていたら `enable_dedicated_scheduler = true` にして apply し、再度数える |
 | 7 | Keep を停止して keep-delivery.fifo に 1,000 件以上溜めてから復旧しても、Dispatcher の同時実行上限が効き、Keep の DB 接続エラーが出ない | keep の API サービスの desired を 0 にする → テスト送信を 1,000 件以上 → desired を 2 に戻す。確認項目は 3 つ：Dispatcher の ConcurrentExecutions ≤ 3、Keep のログに接続プール枯渇のエラーがない、DLQ = 0 |
-| 8 | critical が Keep の停止中も SNS に直送される | Keep を停止した状態で severity=critical のアラートを送り、SNS の購読先に届くことを確認する |
+| 8 | critical が Keep の停止中も内製ツールと SNS の両方に届き、片方の経路が止まっても、もう片方には届く | (a) Keep を停止した状態で severity=critical を送り、内製ツールと SNS の購読先の両方に届くことを確認する。(b) 内製ツールのイベントソースを無効にして送り、SNS に届くこと、`critical_inhouse-oldest-message-age` アラームが鳴ること、有効に戻すと内製ツールに届くことを確認する。(c) router ロールから `sns:Publish` を外して送り、内製ツールには 1 回だけ届き、権限を戻した後の再試行で SNS に届くことを確認する（経路ごとの記録） |
 | 9 | 送信元が許可リストに無い場合とトークン不正の場合に、アラームが上がる | 許可されていない IP から送って WAF のアラームを確認する。不正トークンで送って 4XX のアラームを確認する |
 | 10 | Journal からの再処理 | `KEEP_ACCEPTED` 未満の項目を GSI で抽出し、keep-delivery.fifo へ再投入して Keep に反映されることを確認する |
 | 11 | IaC の再現性 | 変更なしで `terraform plan` の差分が 0 になる（Lambda の zip は再現可能） |
@@ -248,6 +271,9 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 | U7 | Regional NAT の手動モード（`availability_zone_address`）の挙動と単価 | EIP の固定とコスト表（レビュー 18 番） | 最初の apply で確認する |
 | U8 | Keep の 202 の意味（レビュー 17 番） | 設計上は 202 を信用しないため影響はない | Journal の状態は `KEEP_ACCEPTED`（受付）と呼んで区別している |
 | R1 | Alertmanager は 4xx を再試行しない | 誤ったブロックや設定ミスでの欠落 | WAF を COUNT にし、4XX と WAF ブロックのアラームを置き、Ingest は 5xx を返す |
+| U9 | v4 本文（`pagerduty_to_keep_architecture_summary_v4.md`）が未入手 | v4 の完了条件 1〜5 や critical 直送の要件（v4 7.x）との差異を突き合わせられていない | v4 を入手したら §4.1 と §12 を照合する |
+| U10 | 内製ツールの冪等性、キューの種類、タイムアウト | 重複通知や、可視性タイムアウト不足による二重処理 | 契約で `transitionId` による重複排除を求める。既定キューは FIFO で可視性タイムアウト 900 秒（変数で調整） |
+| R3 | critical 経路で送信に失敗すると、そのレコードは Keep にも送られず再試行になる | 片方の経路が恒常的に落ちていると、そのアラートの Keep 反映が遅れる（critical はもう片方の経路で届く） | critical 配送を優先する設計判断。`router-errors` アラームで検知し、DLQ 行きになる前に対処する |
 | R2 | 実 AWS での plan/apply は未実施 | provider の実際の挙動差（例：ACM の検証レコード） | タスク 5〜8 で段階的に apply する。モックによる `terraform test` で配線は検証済み |
 
 ## 15. 最終裁定
@@ -259,6 +285,7 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 2. 送信元 EKS の NAT の egress IP を固定し、`alert_sources` に登録してから Alertmanager の receiver を追加する。WAF と 4XX のアラームを先に有効にしておく。
 3. 完了条件 6（scheduler の二重実行）と 7（復旧時のバースト）を §12 の手順で検証し、結果に応じて `enable_dedicated_scheduler` と `dispatcher_maximum_concurrency` を確定する。
 4. §14 の U1〜U4 を初回構築時に確認し、必要なら変数で是正する。
+5. 内製ツール側でイベントソース、IAM、`transitionId` による重複排除を実装し、完了条件 8（片方の経路が止まってももう片方に届く）を GameDay で確認する（U10）。
 
 **なぜこの裁定に至るのか（so that ×3）**
 
@@ -271,10 +298,10 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
   - 残るリスクは Keep 側の未確認挙動（U1〜U4）に集中し、どれも変数の変更で是正できる。
 - **so that ③：残る不確実性は、実環境の apply と GameDay で閉じられる範囲にあるため。**
   - 実 AWS での plan/apply はまだ行っていない。ただし、静的検証（fmt、validate、tflint、checkov）とモックによる plan テストでモジュール間の配線は確かめてある。未確認事項はフェーズ 1 のタスク 5〜11 の中で検証できる。
-  - 結果が悪くても、critical は Keep を通らない直送経路があり、Journal から再処理できる。そのため critical の配送には影響しない。
+  - 結果が悪くても、critical は Keep を通らない 2 経路（内製ツールと SNS）で並行して届き、Journal から再処理もできる。そのため critical の配送には影響しない。
   - 以上から、着手を止める理由はなく、条件付き Go とする。
 
-**付記**: PagerDuty の解約はフェーズ 3 の完了後とする（v4 の裁定を維持）。フェーズ 1 の間は、critical-direct の SNS から PagerDuty の Amazon SNS 連携 URL へ並行して配送できる（`critical_https_endpoints`）。
+**付記**: PagerDuty の解約はフェーズ 3 の完了後とする（v4 の裁定を維持）。PagerDuty の SNS 連携は選択肢に入れない。フェーズ 1 の間、PagerDuty へは Alertmanager の既存 receiver から従来どおり送り、critical の直送は内製ツールと SNS の 2 経路で行う（§4.1）。
 
 ---
 
@@ -282,12 +309,12 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 
 | 検証 | 結果 |
 |---|---|
-| `pnpm typecheck` / `pnpm test`（vitest） | OK / 6 ファイル 25 件すべて pass |
-| `pnpm build`（esbuild） | `index.mjs` は 0.99MiB、`lambda.zip` は 1.61MiB。2 回ビルドして zip の SHA256 が一致（再現可能） |
+| `pnpm typecheck` / `pnpm test`（vitest） | OK / 7 ファイル 29 件すべて pass |
+| `pnpm build`（esbuild） | `index.mjs` は 0.99MiB、`lambda.zip` は 1.62MiB。2 回ビルドして zip の SHA256 が一致（再現可能） |
 | バンドルのスモークテスト（node で import） | 4 つの handler の export を確認。オーソライザはトークンなしで Deny、不正なイベントで reject、Ingest は不正な payload で 400 |
 | `terraform fmt -check -recursive` | OK |
 | `terraform validate`（モジュール 8 つ、ルート 4 つ） | すべて OK |
-| `terraform test`（モックプロバイダ） | 7 ディレクトリ 17 件すべて pass |
+| `terraform test`（モックプロバイダ） | 7 ディレクトリ 20 件すべて pass（内製ツール用キューの新規作成、既存キューの指定、不正な ARN の拒否を含む） |
 | tflint 0.64 + aws ruleset 0.47.0 | 指摘 0 件 |
 | checkov 3.3.19（`.checkov.yaml`） | 0 件 fail |
 | 実 AWS への plan/apply | **未実施**（資格情報なし） |

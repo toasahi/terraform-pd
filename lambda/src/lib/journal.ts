@@ -37,6 +37,10 @@ export interface JournalShape {
     state: JournalState,
     attributes?: Readonly<Record<string, string>>,
   ) => Effect.Effect<void, AwsError>
+  /** Keep-independent channels the transition was already delivered to (consistent read). */
+  readonly deliveredChannels: (transitionId: string) => Effect.Effect<ReadonlySet<string>, AwsError>
+  /** Records a successful delivery to `channel` (string set; idempotent). */
+  readonly markChannelDelivered: (transitionId: string, channel: string) => Effect.Effect<void, AwsError>
 }
 
 export class Journal extends Context.Tag("Journal")<Journal, JournalShape>() {}
@@ -133,6 +137,39 @@ export const JournalLive = Layer.effect(
       )
     }
 
-    return { putReceived, advance }
+    const deliveredChannels: JournalShape["deliveredChannels"] = (transitionId) =>
+      Effect.tryPromise({
+        try: () =>
+          client.send(
+            new GetItemCommand({
+              TableName: tableName,
+              Key: { transition_id: { S: transitionId } },
+              ConsistentRead: true,
+              ProjectionExpression: "delivered_channels",
+            }),
+          ),
+        catch: (cause) => new AwsError({ operation: "dynamodb:GetItem", cause }),
+      }).pipe(Effect.map((out) => new Set(out.Item?.delivered_channels?.SS ?? [])))
+
+    // Deliver first, then mark: a failure in between re-sends (duplicate) rather than losing the
+    // notification. Consumers deduplicate on transitionId.
+    const markChannelDelivered: JournalShape["markChannelDelivered"] = (transitionId, channel) =>
+      Effect.tryPromise({
+        try: () =>
+          client.send(
+            new UpdateItemCommand({
+              TableName: tableName,
+              Key: { transition_id: { S: transitionId } },
+              UpdateExpression: "ADD delivered_channels :channel SET updated_at = :now",
+              ExpressionAttributeValues: {
+                ":channel": { SS: [channel] },
+                ":now": { S: new Date().toISOString() },
+              },
+            }),
+          ),
+        catch: (cause) => new AwsError({ operation: "dynamodb:UpdateItem", cause }),
+      }).pipe(Effect.asVoid)
+
+    return { putReceived, advance, deliveredChannels, markChannelDelivered }
   }),
 )

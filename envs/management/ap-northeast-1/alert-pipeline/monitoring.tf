@@ -7,6 +7,8 @@ module "monitoring" {
   queues = {
     alerts        = { queue_name = module.queues.queue_names["alerts"], max_oldest_message_seconds = 300 }
     keep_delivery = { queue_name = module.queues.queue_names["keep_delivery"], max_oldest_message_seconds = 900 }
+    # The in-house notifier stopped consuming: critical alerts are then only reaching SNS.
+    critical_inhouse = { queue_name = local.inhouse_queue_name, max_oldest_message_seconds = var.inhouse_notifier_max_oldest_message_seconds }
   }
   dead_letter_queue_names = module.queues.dead_letter_queue_names
 
