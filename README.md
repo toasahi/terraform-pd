@@ -5,9 +5,11 @@ PagerDuty から Keep への置き換えのうち、**フェーズ 1（東京 MV
 - 受信パイプライン：API Gateway REST + WAF → Lambda → DynamoDB Journal / SQS FIFO → Keep
 - Keep 基盤：ECS Fargate、RDS PostgreSQL、ElastiCache Valkey
 
+- Keep のインフラを追加する理由（背景と so that）：[`docs/why-keep.md`](docs/why-keep.md)
 - 計画書・前提確認・最終裁定：[`docs/implementation-plan.md`](docs/implementation-plan.md)
 - 送信元（本番 / 管理 EKS）の設定：[`docs/alertmanager-receiver.md`](docs/alertmanager-receiver.md)
 - critical アラートの直送（内製ツール / SNS）の契約：[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)
+- コーディングエージェント（Claude Code）環境の設計と裁定：[`docs/agent-harness.md`](docs/agent-harness.md)（`CLAUDE.md`、`.claude/`）
 
 ## 構成
 
