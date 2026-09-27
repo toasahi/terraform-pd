@@ -24,7 +24,7 @@ PagerDuty で使っているグローバルオーケストレーターとサー�
 | PagerDuty の機能 | 置き換え先 |
 |---|---|
 | グローバルオーケストレーター（全アラートに共通のルール適用） | 受信パイプライン（API Gateway + WAF → ingest / router Lambda）と Keep |
-| サービスルーター（アラートを宛先ごとに振り分ける） | Keep（ワークフローの YAML 定義は本リポジトリの範囲外）。critical アラートは router Lambda から内製ツールと SNS に直送する（[`critical-notification-contract.md`](critical-notification-contract.md)） |
+| サービスルーター（アラートを宛先ごとに振り分ける） | Keep と内製ツール。Keep は通知するかどうか（重複除去、抑制）を決め、critical 以外のアラートをワークフロー（`keep-workflows/non-critical-to-inhouse.yaml`、反映は人）で SQS 経由で内製ツールに送る（[`non-critical-notification-contract.md`](non-critical-notification-contract.md)）。critical アラートは router Lambda から内製ツールと SNS に直送する（[`critical-notification-contract.md`](critical-notification-contract.md)）。どのルームに送るかは、内製ツールが持つ共通の対応表（システム名 → ルーム）で決める |
 | オンコール管理 | 置き換えない（既存の別ツール） |
 | ポストモーテム管理 | 置き換えない（既存の別ツール） |
 

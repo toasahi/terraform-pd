@@ -36,4 +36,49 @@ module "keep_platform" {
   api_desired_count          = var.api_desired_count
   enable_dedicated_scheduler = var.enable_dedicated_scheduler
   keep_limit_concurrency     = var.keep_limit_concurrency
+
+  # Keep workflows (amazonsqs provider) may only send to these queues.
+  sqs_send_queue_arns = local.sqs_send_queue_arns
+}
+
+# --- Non-critical alerts: Keep workflow -> SQS FIFO -> in-house notifier Lambda -----------------
+# Keep decides whether to notify (deduplication, suppression); the in-house notifier routes each
+# message to a room by labels.system (see docs/non-critical-notification-contract.md).
+# The queue lives in this root, next to its only sender, so that no state is read "backwards"
+# (foundation -> keep -> alert-pipeline). alert-pipeline reads the names below for its alarms.
+#
+# Invariant: Keep's task role gets SendMessage only, never ReceiveMessage/DeleteMessage. Keep runs
+# with CONSUMER=true and the amazonsqs provider can consume; with receive rights Keep would take the
+# notifier's messages, ingest them as alerts and send them again through the workflow (a loop).
+module "notification_queues" {
+  source = "../../../../modules/alert_queues"
+
+  name_prefix = "keep"
+  queues = {
+    # visibility timeout = 6 x the in-house notifier Lambda timeout (consumer lives in the tool repo)
+    non_critical_inhouse = { visibility_timeout_seconds = var.inhouse_notifier_visibility_timeout_seconds }
+  }
+}
+
+locals {
+  sqs_send_queue_arns = [module.notification_queues.queue_arns["non_critical_inhouse"]]
+
+  # The workflow is deployed to Keep by an operator; it is read here only to guard its invariants.
+  non_critical_workflow = yamldecode(file("${path.module}/../../../../keep-workflows/non-critical-to-inhouse.yaml"))
+  non_critical_sqs_actions = [
+    for action in local.non_critical_workflow.workflow.actions : action
+    if action.provider.type == "amazonsqs"
+  ]
+}
+
+# Keep's amazonsqs provider sends MessageGroupId / MessageDeduplicationId to a .fifo queue and
+# requires both arguments (keep/providers/amazonsqs_provider/amazonsqs_provider.py, _notify).
+check "non_critical_workflow_fits_fifo_queue" {
+  assert {
+    condition = length(local.non_critical_sqs_actions) > 0 && alltrue([
+      for action in local.non_critical_sqs_actions :
+      contains(keys(action.provider.with), "group_id") && contains(keys(action.provider.with), "dedup_id")
+    ])
+    error_message = "keep-workflows/non-critical-to-inhouse.yaml: every amazonsqs action must set with.group_id and with.dedup_id (the queue is FIFO)."
+  }
 }

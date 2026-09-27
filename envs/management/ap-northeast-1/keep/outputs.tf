@@ -32,3 +32,23 @@ output "db_instance_identifier" {
   description = "RDS instance identifier."
   value       = module.keep_platform.db_instance_identifier
 }
+
+output "non_critical_inhouse_queue_arn" {
+  description = "ARN of the non-critical queue (event source of the in-house notifier Lambda)."
+  value       = module.notification_queues.queue_arns["non_critical_inhouse"]
+}
+
+output "non_critical_inhouse_queue_url" {
+  description = "URL of the non-critical queue (sqs_queue_url of Keep's amazonsqs provider)."
+  value       = module.notification_queues.queue_urls["non_critical_inhouse"]
+}
+
+output "non_critical_inhouse_queue_name" {
+  description = "Name of the non-critical queue (alarm dimension in alert-pipeline)."
+  value       = module.notification_queues.queue_names["non_critical_inhouse"]
+}
+
+output "non_critical_inhouse_dead_letter_queue_name" {
+  description = "Name of the non-critical queue's DLQ (alarm dimension in alert-pipeline)."
+  value       = module.notification_queues.dead_letter_queue_names["non_critical_inhouse"]
+}

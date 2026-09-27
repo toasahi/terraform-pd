@@ -34,7 +34,7 @@ variable "alert_sources" {
 }
 
 variable "critical_severities" {
-  description = "Alert severities (labels.severity) delivered to the in-house notifier and SNS, independent of Keep."
+  description = "Alert severities (labels.severity) delivered to the in-house notifier and SNS, independent of Keep. When changing it, also change the CEL of keep-workflows/non-critical-to-inhouse.yaml (Keep maps only labels.severity == \"critical\" to severity critical), otherwise an alert reaches both the critical and the non-critical route."
   type        = list(string)
   default     = ["critical"]
 }
@@ -72,6 +72,12 @@ variable "inhouse_notifier_max_oldest_message_seconds" {
   description = "Age of the oldest unconsumed critical notification that raises an alarm (the in-house notifier is not consuming)."
   type        = number
   default     = 120
+}
+
+variable "non_critical_inhouse_max_oldest_message_seconds" {
+  description = "Age of the oldest unconsumed non-critical notification (keep root queue) that raises an alarm."
+  type        = number
+  default     = 300
 }
 
 variable "alarm_email_endpoints" {

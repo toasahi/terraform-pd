@@ -11,4 +11,4 @@
 | `waf-blocked-requests` | WAF の BlockedRequests |
 | `<service>-running-tasks` | ECS の RunningTaskCount が下限を下回った |
 
-出力：`alarm_topic_arn`
+出力：`alarm_topic_arn`、`queue_age_alarms`（キューの論理名 → `<queue>-oldest-message-age` のアラーム名、監視するキュー名、しきい値の秒数）、`dead_letter_alarms`（キューの論理名 → `<queue>-dlq-not-empty` のアラーム名、監視する DLQ 名）

@@ -9,8 +9,13 @@ module "monitoring" {
     keep_delivery = { queue_name = module.queues.queue_names["keep_delivery"], max_oldest_message_seconds = 900 }
     # The in-house notifier stopped consuming: critical alerts are then only reaching SNS.
     critical_inhouse = { queue_name = local.inhouse_queue_name, max_oldest_message_seconds = var.inhouse_notifier_max_oldest_message_seconds }
+    # Non-critical queue (created in the keep root, sent to by Keep's workflow): the notifier stopped consuming.
+    non_critical_inhouse = { queue_name = local.keep.non_critical_inhouse_queue_name, max_oldest_message_seconds = var.non_critical_inhouse_max_oldest_message_seconds }
   }
-  dead_letter_queue_names = module.queues.dead_letter_queue_names
+  dead_letter_queue_names = merge(
+    module.queues.dead_letter_queue_names,
+    { non_critical_inhouse = local.keep.non_critical_inhouse_dead_letter_queue_name },
+  )
 
   lambda_function_names = {
     authorizer = module.authorizer.function_name

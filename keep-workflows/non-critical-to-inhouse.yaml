@@ -1,0 +1,29 @@
+# Keep workflow: every non-critical alert -> SQS FIFO keep-non-critical-inhouse.fifo -> in-house notifier.
+#
+# Deployed to Keep by an operator (Keep UI or API), not by Terraform. Before deploying, register an
+# amazonsqs provider named "inhouse-non-critical" (region_name = ap-northeast-1, sqs_queue_url = the
+# keep root output non_critical_inhouse_queue_url, access keys empty so the ECS task role is used).
+# Contract with the in-house notifier: docs/non-critical-notification-contract.md.
+#
+# Invariants (guarded by the keep root's check block and tests/keep.tftest.hcl):
+# - group_id and dedup_id are required by the amazonsqs provider and used as MessageGroupId /
+#   MessageDeduplicationId because the queue is FIFO.
+# - Do not reference alert.labels.system (or any optional label) under "with": a missing key fails the
+#   render and drops the alert; the notifier handles a missing label with its fallback room.
+# - The CEL compares Keep's severity; keep it in line with alert-pipeline's critical_severities.
+workflow:
+  id: non-critical-to-inhouse
+  name: Non-critical alerts to the in-house notifier
+  description: Sends every alert whose severity is not critical to the in-house notifier queue; the notifier routes it to a room by labels.system.
+  triggers:
+    - type: alert
+      cel: severity != "critical"
+  actions:
+    - name: send-to-inhouse-notifier
+      provider:
+        type: amazonsqs
+        config: "{{ providers.inhouse-non-critical }}"
+        with:
+          message: "{{ alert }}"
+          group_id: "{{ alert.fingerprint }}"
+          dedup_id: "{{ alert.fingerprint }}:{{ alert.status }}:{{ alert.lastReceived }}"

@@ -44,6 +44,8 @@ SQS ではメッセージ本文、SNS では `Message` にそのまま入りま�
 
 スキーマ定義は `lambda/src/lib/critical.ts` の `CriticalNotification`（Effect Schema）です。互換性のない変更をする場合は `schemaVersion` を上げます。
 
+システム名は `labels.system` に入ります。システム名 → 通知ルームの対応表は内製ツールのリポジトリ（YAML、Git 管理）にあり、critical と non-critical で**共通**です。ラベルが無い場合や対応表に無い場合はフォールバックのルームに送ります。non-critical 側の契約は [`non-critical-notification-contract.md`](non-critical-notification-contract.md) を参照してください。
+
 ## 内製ツール側の設定（管理アカウント）
 
 既定では、キューは本リポジトリの `alert-pipeline` ルートが作ります。ARN は出力 `inhouse_notifier_queue_arn` で確認できます。

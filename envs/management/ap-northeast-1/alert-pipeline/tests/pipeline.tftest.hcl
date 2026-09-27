@@ -38,6 +38,11 @@ override_data {
       cluster_name           = "keep"
       service_names          = { api = "keep-api", ui = "keep-ui" }
       service_desired_counts = { api = 2, ui = 1 }
+
+      non_critical_inhouse_queue_arn              = "arn:aws:sqs:ap-northeast-1:111111111111:keep-non-critical-inhouse.fifo"
+      non_critical_inhouse_queue_url              = "https://sqs.ap-northeast-1.amazonaws.com/111111111111/keep-non-critical-inhouse.fifo"
+      non_critical_inhouse_queue_name             = "keep-non-critical-inhouse.fifo"
+      non_critical_inhouse_dead_letter_queue_name = "keep-non-critical-inhouse-dlq.fifo"
     }
   }
 }
@@ -98,6 +103,27 @@ run "inhouse_notifier_queue_created_by_default" {
   assert {
     condition     = contains(keys(module.queues.dead_letter_queue_names), "critical_inhouse")
     error_message = "The in-house notifier queue needs a DLQ (tool-side failures)."
+  }
+}
+
+run "non_critical_inhouse_alarms" {
+  command = plan
+
+  assert {
+    condition = module.monitoring.queue_age_alarms["non_critical_inhouse"] == {
+      alarm_name = "alert-pipeline-non_critical_inhouse-oldest-message-age"
+      queue_name = "keep-non-critical-inhouse.fifo"
+      threshold  = 300
+    }
+    error_message = "The non-critical queue (keep root) needs an oldest-message-age alarm on keep-non-critical-inhouse.fifo at 300 s (in-house notifier not consuming)."
+  }
+
+  assert {
+    condition = module.monitoring.dead_letter_alarms["non_critical_inhouse"] == {
+      alarm_name = "alert-pipeline-non_critical_inhouse-dlq-not-empty"
+      queue_name = "keep-non-critical-inhouse-dlq.fifo"
+    }
+    error_message = "The non-critical DLQ (keep root) needs a not-empty alarm on keep-non-critical-inhouse-dlq.fifo."
   }
 }
 

@@ -9,6 +9,7 @@ PagerDuty から Keep への置き換えのうち、**フェーズ 1（東京 MV
 - 計画書・前提確認・最終裁定：[`docs/implementation-plan.md`](docs/implementation-plan.md)
 - 送信元（本番 / 管理 EKS）の設定：[`docs/alertmanager-receiver.md`](docs/alertmanager-receiver.md)
 - critical アラートの直送（内製ツール / SNS）の契約：[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)
+- critical 以外のアラート（Keep → SQS → 内製ツール）の契約：[`docs/non-critical-notification-contract.md`](docs/non-critical-notification-contract.md)
 - コーディングエージェント（Claude Code）環境の設計と裁定：[`docs/agent-harness.md`](docs/agent-harness.md)（`CLAUDE.md`、`.claude/`）
 
 ## アーキテクチャ
@@ -31,8 +32,9 @@ envs/management/ap-northeast-1/ ルートモジュール（provider とバージ
   backend.hcl                  S3 backend の共通設定（use_lockfile）
   bootstrap/                   tfstate 用 S3 バケット
   foundation/                  network + container_registry
-  keep/                        keep_platform
+  keep/                        keep_platform、non-critical 用キュー（Keep → 内製ツール）
   alert-pipeline/              Journal、キュー（内製ツール用を含む）、Lambda ×4、ingress、SNS、監視
+keep-workflows/                Keep ワークフローの YAML（Keep への反映は人が行う）
 lambda/                        TypeScript + Effect（Node.js 24、pnpm、esbuild、vitest）
 helpers/                       build-lambda.sh、mirror-keep-images.sh
 ```
@@ -63,9 +65,10 @@ helpers/                       build-lambda.sh、mirror-keep-images.sh
 3. **Keep イメージのミラー**：`helpers/mirror-keep-images.sh --version <tag> --account <id>` を実行し、表示された digest を `keep/terraform.tfvars` に設定します。
 4. **keep**：`terraform apply`。
 5. **Keep API キー**：Keep の UI で発行し、`aws secretsmanager put-secret-value --secret-id keep/api-key-dispatcher --secret-string <key>` で保存します。
+   - あわせて、Keep に amazonsqs プロバイダ `inhouse-non-critical`（`sqs_queue_url` は keep の出力 `non_critical_inhouse_queue_url`）を登録し、`keep-workflows/non-critical-to-inhouse.yaml` を反映します（[`docs/non-critical-notification-contract.md`](docs/non-critical-notification-contract.md)）。
 6. **Lambda のビルド**：`helpers/build-lambda.sh` で `lambda/dist/lambda.zip` を作ります（未ビルドのまま plan すると precondition でエラーになります）。
-7. **alert-pipeline**：`terraform apply`。
-8. **内製ツールの接続**：出力 `inhouse_notifier_queue_arn` を内製ツール Lambda のイベントソースに設定します（[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)）。
+7. **alert-pipeline**：`terraform apply`。keep の出力（non-critical キューの名前）を読むので、keep を先に apply しておく必要があります。
+8. **内製ツールの接続**：alert-pipeline の出力 `inhouse_notifier_queue_arn`（critical）と keep の出力 `non_critical_inhouse_queue_arn`（non-critical）を、内製ツール Lambda のイベントソースに設定します（[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)、[`docs/non-critical-notification-contract.md`](docs/non-critical-notification-contract.md)）。
 9. **送信元の登録**：[`docs/alertmanager-receiver.md`](docs/alertmanager-receiver.md) の手順で、トークンの digest 登録と Alertmanager の receiver 追加を行います。
 
 ## 開発と検証

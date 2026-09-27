@@ -17,7 +17,7 @@
 |---|---|
 | 目的 | レビュー v4 の条件付き Go を受け、フェーズ 1（東京 MVP）の受信パイプラインと Keep 基盤を Terraform でコード化する。修正必須事項（REST API への変更など）をコードで担保する |
 | 範囲内 | 次の要素を管理アカウント（ap-northeast-1）に作る <br>- 受信口（API Gateway REST + WAF + Lambda オーソライザ）<br>- Journal（DynamoDB）<br>- FIFO キュー<br>- Lambda 4 本（TypeScript + Effect / Node.js 24）<br>- critical 直送（SNS）<br>- Keep（ECS Fargate、RDS PostgreSQL、ElastiCache Valkey、internal ALB）<br>- ネットワーク（Regional NAT）<br>- 監視<br>- tfstate 基盤 |
-| 範囲外 | 次の 3 つ <br>- 大阪 DR の実リソース（フェーズ 3）<br>- 送信元（本番 EKS と管理 EKS）の Alertmanager 設定そのもの（設定例は `docs/alertmanager-receiver.md`）<br>- Keep のワークフロー定義（YAML） |
+| 範囲外 | 次の 3 つ（3 つ目には例外あり） <br>- 大阪 DR の実リソース（フェーズ 3）<br>- 送信元（本番 EKS と管理 EKS）の Alertmanager 設定そのもの（設定例は `docs/alertmanager-receiver.md`）<br>- Keep のワークフロー定義（YAML）。ただし non-critical を内製ツールへ送る 1 本（`keep-workflows/non-critical-to-inhouse.yaml`）だけは範囲内とする（Keep への反映は人が行う。§4.2） |
 | 前提 | アカウントは開発、ステージング、本番、管理の 4 つ。アラートの送信元は **本番 EKS と管理 EKS のみ**で、**管理アカウントの ECS（Keep）に集約**する |
 
 ## 2. 前提確認の結果
@@ -64,6 +64,8 @@
 └────────────────────────────────────────────────┘   │               └→ keep-delivery.fifo               │
   開発 / ステージング: 送信しない                     │   → dispatcher λ(VPC) → internal ALB → Keep(ECS)    │
                                                       │   Keep: RDS PostgreSQL / ElastiCache Valkey          │
+                                                      │   Keep workflow(critical 以外)                       │
+                                                      │     → keep-non-critical-inhouse.fifo → 内製ツール λ  │
                                                       └──────────────────────────────────────────────────────┘
 ```
 
@@ -92,6 +94,9 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
   → dispatcher λ（keep-delivery.fifo, VPC 内, ESM max 3, 予約同時実行数 3）
       POST https://keep-api.<zone>/alerts/event/prometheus?fingerprint=<source>:<fp>（X-API-KEY）
       202 → state=KEEP_ACCEPTED（202 は「受付」であって永続化完了ではない。レビュー #2）
+  → Keep ワークフロー non-critical-to-inhouse（CEL: severity != "critical"、§4.2）
+      amazonsqs → keep-non-critical-inhouse.fifo（group=fingerprint, dedup=<fingerprint>:<status>:<lastReceived>）
+      → 内製ツール λ（labels.system で通知ルームを決める。対応表は内製ツール側で critical と共通）
 ```
 
 - **状態は前進のみ**: Journal の `state_rank` を条件付きで更新するため、並行実行や再配信でも状態は戻らない。
@@ -113,6 +118,20 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 - 配送は各経路とも at-least-once で、受け手は `transitionId` で重複を除く。送信成功から Journal への記録までの間に障害が起きると再送されるが、取りこぼしよりは重複を選ぶ。
 - 契約（JSON スキーマ、内製ツール側の ESM と IAM の設定）は [`critical-notification-contract.md`](critical-notification-contract.md) にまとめた。
 - 内製ツール用キューは既定で本リポジトリが作る（FIFO + DLQ）。ツールがすでに監視しているキューがあれば、`inhouse_notifier_existing_queue_arn` でそちらに送る。標準キューと FIFO キューの両方に対応し、SSE-KMS なら `inhouse_notifier_kms_key_arn` も渡す。
+
+### 4.2 non-critical アラートの経路（Keep → SQS FIFO → 内製ツール）
+
+前提：100 以上のシステムと 100 以上の通知ルームがある。critical 以外のアラートも内製ツールで各ルームに届けたい。Keep は重複除去や抑制で「通知するかどうか」を決める。
+
+**裁定：Keep のワークフロー 1 本（`keep-workflows/non-critical-to-inhouse.yaml`）で、critical 以外の全アラートを `keep-non-critical-inhouse.fifo` に送る。ルームへの振り分けは内製ツールの対応表（システム名 `labels.system` → ルーム、YAML を Git 管理、critical と共通）で行う。キューは `keep` ルートに置く。**
+
+- **so that ①：振り分けを 1 か所で持つため。** 100 × 100 の振り分けを Keep のワークフローに書くと、ワークフローの数と変更の手間が増え、critical 側と二重管理になる。内製ツールの対応表 1 つにまとめれば、critical と non-critical で同じ表を使える。ラベルが無いアラートや対応表に無いシステム名は、内製ツールがフォールバックのルームに送る。そのためワークフローは `labels.system` を参照しない（キーが無いとレンダリングに失敗して送信自体が落ちる。keephq/keep v0.54.3 `keep/iohandler/iohandler.py`）。
+- **so that ②：アラート単位の順序を保つため（FIFO）。** Keep の amazonsqs プロバイダは、キュー URL が `.fifo` なら `group_id` と `dedup_id` を `MessageGroupId` / `MessageDeduplicationId` として送る（keephq/keep v0.54.3 `keep/providers/amazonsqs_provider/amazonsqs_provider.py`）。group を fingerprint にすれば、critical と同じくアラートごとに firing → resolved の順で届く。キューの設定は `alert_queues` の既定（SSE-SQS、`maxReceiveCount` 5、高スループット FIFO、redrive allow policy）をそのまま使う。
+- **so that ③：ルート間の依存方向を崩さないため（keep ルートに置く）。** alert-pipeline はすでに keep の state を読んでいる。キューを alert-pipeline に置くと、送信権限を付ける keep ルートが alert-pipeline の state を読むことになり循環する（§6.2 の適用順にも反する）。送信側の Keep と同じ keep ルートに置けば、ARN を `keep_platform` の `sqs_send_queue_arns` に直接渡せる。アラームは alert-pipeline の `alert_monitoring` が keep の出力（キュー名）を読んで作る。
+
+- ワークフローの不変条件（`group_id` と `dedup_id` があること）は、keep ルートの `check` ブロックとテストで確かめる。Keep への反映自体は人が行う。
+- Keep のタスクロールには送信権限だけを付け、受信権限は付けない。Keep は `CONSUMER=true` で動き、amazonsqs プロバイダは消費もできるため、受信権限があると内製ツール宛てのメッセージを横取りしてループになる（keephq/keep v0.54.3 `keep/event_subscriber/event_subscriber.py`）。
+- 契約（本文、重複排除キー、内製ツール側の設定、Keep 側の手作業）は [`non-critical-notification-contract.md`](non-critical-notification-contract.md) にまとめた。
 
 ## 5. Terraform の設計方針（ベストプラクティスとの対応）
 
@@ -156,10 +175,11 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 | 0 | `bootstrap` | tfstate 用の S3 バケット。初回はローカル state で作り、その後 S3 に移行する | なし |
 | 1 | `foundation` | `network`、`container_registry` | bootstrap |
 | 2 | （手作業） | `helpers/mirror-keep-images.sh` で Keep イメージをミラーし、digest を控える | foundation |
-| 3 | `keep` | `keep_platform` | foundation |
+| 3 | `keep` | `keep_platform`、non-critical 用キュー `keep-non-critical-inhouse.fifo`（+ DLQ） | foundation |
 | 4 | （手作業） | Keep で API キーを発行し、`keep/api-key-dispatcher` に保存する | keep |
-| 5 | `alert-pipeline` | Journal、キュー（内製ツール用を含む）、Lambda ×4、ingress、SNS、監視 | foundation、keep、`lambda/dist/lambda.zip` |
-| 5a | （内製ツール側） | 出力 `inhouse_notifier_queue_arn` を内製ツール Lambda のイベントソースに設定し、実行ロールに受信権限を付ける | alert-pipeline |
+| 4a | （手作業） | Keep に amazonsqs プロバイダ `inhouse-non-critical`（`sqs_queue_url` は出力 `non_critical_inhouse_queue_url`、アクセスキーは空欄）を登録し、`keep-workflows/non-critical-to-inhouse.yaml` を反映する | keep |
+| 5 | `alert-pipeline` | Journal、キュー（内製ツール用を含む）、Lambda ×4、ingress、SNS、監視（keep ルートの non-critical キューのアラームを含む） | foundation、keep、`lambda/dist/lambda.zip` |
+| 5a | （内製ツール側） | alert-pipeline の出力 `inhouse_notifier_queue_arn`（critical）と keep の出力 `non_critical_inhouse_queue_arn`（non-critical）を内製ツール Lambda のイベントソースに設定し、実行ロールに受信権限を付ける | alert-pipeline、keep |
 | 6 | （手作業） | 送信元トークンの digest を `alert-pipeline/source-token-digests` に保存し、Alertmanager に receiver を追加する | alert-pipeline |
 
 ## 7. Lambda の設計（`lambda/`）
@@ -210,8 +230,9 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 
 | 対象 | 条件 | 意味 |
 |---|---|---|
-| DLQ ×3（alerts / keep-delivery / critical-inhouse） | 可視メッセージ > 0 | 配送不能。調査のうえ `StartMessageMoveTask` で redrive する（critical-inhouse の DLQ は内製ツール側の処理失敗） |
+| DLQ ×4（alerts / keep-delivery / critical-inhouse / non-critical-inhouse） | 可視メッセージ > 0 | 配送不能。調査のうえ `StartMessageMoveTask` で redrive する（critical-inhouse と non-critical-inhouse の DLQ は内製ツール側の処理失敗） |
 | critical-inhouse キュー | 最古メッセージの経過時間 > 120 秒 | 内製ツールが消費していない。この間 critical は SNS 経路だけで届いている |
+| non-critical-inhouse キュー（keep ルート） | 最古メッセージの経過時間 > 300 秒 | 内製ツールが non-critical を消費していない |
 | alerts.fifo / keep-delivery.fifo | 最古メッセージの経過時間 > 300 秒 / 900 秒 | 消費が停止している（Keep の停止など） |
 | Lambda ×4 | Errors > 0 | ハンドラの失敗 |
 | dispatcher | Throttles > 0 | 予約同時実行数の不足 |
@@ -232,6 +253,7 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 | 7 | Keep の初期設定（管理者、API キー、prometheus プロバイダ、heartbeat ワークフロー） | Keep | 未着手（実環境） |
 | 8 | alert-pipeline の apply、トークン digest の投入 | 受信口 | 未着手（実環境） |
 | 8a | 内製ツール Lambda に critical キューのイベントソースと IAM を設定し、`transitionId` で重複を除く | `docs/critical-notification-contract.md` | 未着手（内製ツール側） |
+| 8b | Keep に amazonsqs プロバイダを登録してワークフローを反映し、内製ツール Lambda に non-critical キューのイベントソースと IAM を設定する（対応表は critical と共通） | `keep-workflows/non-critical-to-inhouse.yaml`、`docs/non-critical-notification-contract.md` | 未着手（実環境、内製ツール側） |
 | 9 | 本番 EKS と管理 EKS の Alertmanager に receiver を追加（PagerDuty との並行運用） | `docs/alertmanager-receiver.md` | 未着手（実環境） |
 | 10 | CI への plan ジョブ追加（GitHub OIDC → 管理アカウントの plan 専用ロール） | CI | 未着手 |
 | 11 | フェーズ 1 の完了条件の検証と GameDay（§12） | 検証記録 | 未着手 |
@@ -273,6 +295,12 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 | R1 | Alertmanager は 4xx を再試行しない | 誤ったブロックや設定ミスでの欠落 | WAF を COUNT にし、4XX と WAF ブロックのアラームを置き、Ingest は 5xx を返す |
 | U9 | v4 本文（`pagerduty_to_keep_architecture_summary_v4.md`）が未入手 | v4 の完了条件 1〜5 や critical 直送の要件（v4 7.x）との差異を突き合わせられていない | v4 を入手したら §4.1 と §12 を照合する |
 | U10 | 内製ツールの冪等性、キューの種類、タイムアウト | 重複通知や、可視性タイムアウト不足による二重処理 | 契約で `transitionId` による重複排除を求める。既定キューは FIFO で可視性タイムアウト 900 秒（変数で調整） |
+| U11 | Keep ワークフローの `{{ alert }}` が実行時に正しい JSON になるか（chevron の HTML エスケープ → Keep の `html.unescape`。値に実体参照や `keep.xxx(` を含むと変形や関数評価エラーの可能性） | non-critical の本文が壊れ、内製ツールが解釈できない | Keep の初回構築時にテストアラートを送り、本文を確認する |
+| U12 | Keep が重複として扱うイベント（Alertmanager の repeat による再送）でワークフローが起動するか | 起動すると non-critical の通知量が増える | GameDay で確認し、必要なら `only_on_change: [status]` の追加をユーザーが判断する |
+| U13 | amazonsqs プロバイダのスコープ検証メッセージ（`KEEP_SCOPE_TEST_MSG_PLEASE_IGNORE`）が送られる時機（登録時のみか、定期的か） | 内製ツールが破棄しないと誤通知になる | 契約で破棄を求める。初回登録時にキューを観察する |
+| U14 | SQS の `MessageGroupId` / `MessageDeduplicationId` の制約（長さ、文字種）とメッセージサイズの上限（AWS の一次情報源を未取得） | 制約を超えると送信が失敗する | fingerprint は `<source>:<16 桁 hex>` なので 128 文字以内に収まる見込み。AWS の SQS API リファレンスで確認する |
+| U15 | 配備する Keep のタグが、参照したソース（v0.54.3）と同じ挙動か | amazonsqs プロバイダ、AlertDto、CEL の前処理が変わると契約が崩れる | イメージのミラー時にソースの差分を確認する |
+| R4 | `critical_severities` を既定の `["critical"]` から広げると、Keep の severity（`labels.severity == "critical"` のときだけ critical）とずれる | そのアラートが critical 経路と non-critical 経路の両方に届く | 変数の description と契約に明記した。変えるときはワークフローの CEL も合わせる |
 | R3 | critical 経路で送信に失敗すると、そのレコードは Keep にも送られず再試行になる | 片方の経路が恒常的に落ちていると、そのアラートの Keep 反映が遅れる（critical はもう片方の経路で届く） | critical 配送を優先する設計判断。`router-errors` アラームで検知し、DLQ 行きになる前に対処する |
 | R2 | 実 AWS での plan/apply は未実施 | provider の実際の挙動差（例：ACM の検証レコード） | タスク 5〜8 で段階的に apply する。モックによる `terraform test` で配線は検証済み |
 
@@ -326,6 +354,7 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 - hashicorp/terraform-provider-aws（CHANGELOG 6.24.0、`r/nat_gateway`、`r/wafv2_web_acl_association`、`r/lambda_event_source_mapping`、`r/dynamodb_table`）— https://github.com/hashicorp/terraform-provider-aws
 - hashicorp/terraform CHANGELOG v1.10 / v1.11（S3 のネイティブロック）— https://github.com/hashicorp/terraform
 - keephq/keep（`keep/api/routes/alerts.py`、`keep/identitymanager/authverifierbase.py`、`keep/providers/prometheus_provider/prometheus_provider.py`、`docs/deployment/configuration.mdx`）— https://github.com/keephq/keep
+- keephq/keep v0.54.3（non-critical 経路、§4.2）：`keep/providers/amazonsqs_provider/amazonsqs_provider.py`（`_notify`、`validate_scopes`、`start_consume`）、`keep/api/models/alert.py`（`AlertDto.__str__`）、`keep/iohandler/iohandler.py`（`render_context`、`_render`）、`keep/api/utils/cel_utils.py`、`keep/event_subscriber/event_subscriber.py`、`docs/workflows/syntax/triggers.mdx`、`docs/providers/documentation/amazonsqs-provider.mdx`— https://github.com/keephq/keep/tree/v0.54.3
 - prometheus/alertmanager（`notify/util.go`、`notify/webhook/webhook.go`、`docs/configuration.md`）— https://github.com/prometheus/alertmanager
 - Effect（npm の `effect` の dist-tags、Effect-TS/effect の README）— https://github.com/Effect-TS/effect
 - oven-sh/bun `packages/bun-lambda/runtime.ts`（不採用の根拠）— https://github.com/oven-sh/bun/tree/main/packages/bun-lambda

@@ -50,3 +50,9 @@ variable "keep_limit_concurrency" {
   type        = string
   default     = "100/minute"
 }
+
+variable "inhouse_notifier_visibility_timeout_seconds" {
+  description = "Visibility timeout of the non-critical queue consumed by the in-house notifier; at least 6x the tool Lambda's timeout."
+  type        = number
+  default     = 900
+}
