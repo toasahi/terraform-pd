@@ -11,6 +11,7 @@ PagerDuty から Keep への置き換えのうち、**フェーズ 1（東京 MV
 - critical アラートの直送（内製ツール / SNS）の契約：[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)
 - critical 以外のアラート（Keep → SQS → 内製ツール）の契約：[`docs/non-critical-notification-contract.md`](docs/non-critical-notification-contract.md)
 - コーディングエージェント（Claude Code）環境の設計と裁定：[`docs/agent-harness.md`](docs/agent-harness.md)（`CLAUDE.md`、`.claude/`）
+- フェーズ 1 のランニングコスト試算とリソース割当量：[`docs/cost-estimate.md`](docs/cost-estimate.md)
 
 ## アーキテクチャ
 
