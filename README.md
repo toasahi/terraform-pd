@@ -11,6 +11,10 @@ PagerDuty から Keep への置き換えのうち、**フェーズ 1（東京 MV
 - critical アラートの直送（内製ツール / SNS）の契約：[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)
 - コーディングエージェント（Claude Code）環境の設計と裁定：[`docs/agent-harness.md`](docs/agent-harness.md)（`CLAUDE.md`、`.claude/`）
 
+## アーキテクチャ
+
+![PagerDuty から Keep への置き換え Phase 1 東京 MVP の AWS アーキテクチャ](docs/architecture-phase1-tokyo.png)
+
 ## 構成
 
 ```
