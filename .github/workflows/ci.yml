@@ -39,6 +39,17 @@ jobs:
           path: lambda/dist/lambda.zip
           retention-days: 7
 
+  harness:
+    name: agent harness (workflow engine / hooks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: node --test '.claude/scripts/test/*.test.mjs'
+      - run: for f in .claude/hooks/*.sh .claude/scripts/*.sh; do bash -n "$f"; done
+
   terraform:
     name: terraform (fmt / validate / test)
     runs-on: ubuntu-latest

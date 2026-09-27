@@ -22,3 +22,8 @@ lambda/dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Claude Code (personal settings, workflow run state and reports)
+.claude/settings.local.json
+CLAUDE.local.md
+.agent-runs/

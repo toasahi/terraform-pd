@@ -1,0 +1,149 @@
+{
+  "name": "develop",
+  "description": "plan -> implement (tests first) -> parallel review + test -> fix loop -> supervise. Modelled on takt's development-core / terraform workflows: agents do the work, this file decides what happens next.",
+  "max_steps": 20,
+  "initial_step": "plan",
+  "all_steps": {
+    "rules": [
+      {
+        "when": "ask_human",
+        "next": "ASK_HUMAN",
+        "description": "A decision that belongs to the user (requirement conflict, apply-time facts, missing access)"
+      },
+      {
+        "when": "abort",
+        "next": "ABORT",
+        "description": "The task cannot be done safely within this repository's policies"
+      }
+    ]
+  },
+  "steps": {
+    "plan": {
+      "agent": "planner",
+      "edit": false,
+      "report": "plan.md",
+      "instruction": "Investigate the request against the code and docs/. Produce plan.md per the planner output contract: requirements, so that, affected files, test-first strategy, verification commands, risks, unverified facts.",
+      "rules": [
+        {
+          "when": "planned",
+          "next": "implement",
+          "description": "Plan is complete and within scope"
+        }
+      ]
+    },
+    "implement": {
+      "agent": "implementer",
+      "edit": true,
+      "report": "implementation.md",
+      "instruction": "Follow plan.md. Write or update the failing test first, then the change, then run .claude/scripts/verify.sh --level full. Do not commit.",
+      "rules": [
+        {
+          "when": "implemented",
+          "next": "reviewers",
+          "description": "Change done and verify.sh reports PASS (or UNVERIFIED with the missing tool named)"
+        },
+        {
+          "when": "need_replan",
+          "next": "plan",
+          "description": "The plan is wrong or incomplete; say why"
+        }
+      ]
+    },
+    "reviewers": {
+      "parallel": [
+        "code-reviewer",
+        "security-reviewer",
+        "ai-antipattern-reviewer",
+        "tester"
+      ],
+      "edit": false,
+      "labels": [
+        "approved",
+        "needs_fix"
+      ],
+      "instruction": "Each reviewer reads plan.md, implementation.md and the diff (git diff against the merge-base), and returns its report per its output contract. Reviewers never edit files.",
+      "rules": [
+        {
+          "all": "approved",
+          "next": "supervise"
+        },
+        {
+          "any": "needs_fix",
+          "next": "fix"
+        }
+      ]
+    },
+    "fix": {
+      "agent": "implementer",
+      "edit": true,
+      "report": "fix.md",
+      "instruction": "Fix every blocking finding from the latest review reports (and nothing else), then run .claude/scripts/verify.sh --level full. Answer each finding: fixed (how) or not fixed (why).",
+      "rules": [
+        {
+          "when": "fixed",
+          "next": "reviewers"
+        },
+        {
+          "when": "need_replan",
+          "next": "plan"
+        }
+      ]
+    },
+    "supervise": {
+      "agent": "supervisor",
+      "edit": false,
+      "report": "verdict.md",
+      "instruction": "Final gate. Check every requirement in plan.md against the diff and fresh verify.sh output. Do not review style. Issue the verdict: approve, reject (with the unmet requirement) or blocked (verification impossible in this environment).",
+      "rules": [
+        {
+          "when": "approve",
+          "next": "COMPLETE"
+        },
+        {
+          "when": "reject",
+          "next": "fix"
+        },
+        {
+          "when": "blocked",
+          "next": "ASK_HUMAN"
+        }
+      ]
+    }
+  },
+  "loop_monitors": [
+    {
+      "name": "review-fix",
+      "cycle": [
+        "reviewers",
+        "fix"
+      ],
+      "threshold": 3,
+      "max": 5,
+      "on_max": "ASK_HUMAN",
+      "judge": {
+        "agent": "supervisor",
+        "instruction": "The review -> fix cycle has repeated {cycle_count} times. Compare the review reports across cycles: are blocking findings shrinking and not reappearing (converging), or oscillating / conflicting (unproductive)?",
+        "rules": [
+          {
+            "when": "converging",
+            "next": "$resume"
+          },
+          {
+            "when": "unproductive",
+            "next": "ASK_HUMAN"
+          }
+        ]
+      }
+    },
+    {
+      "name": "replan",
+      "cycle": [
+        "plan",
+        "implement",
+        "fix"
+      ],
+      "max": 1,
+      "on_max": "ASK_HUMAN"
+    }
+  ]
+}
