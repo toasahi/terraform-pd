@@ -284,25 +284,26 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 
 | # | 項目 | 影響 | 対応 |
 |---|---|---|---|
-| U1 | Keep の Redis クライアントが TLS に対応しているか | 未対応なら Valkey の通信暗号化を有効にできない（現状は無効で、SG で制限） | フェーズ 1 で検証し、対応していれば `transit_encryption_enabled` を有効にする |
-| U2 | `KEEP_DEFAULT_USERNAME` / `KEEP_DEFAULT_PASSWORD`（AUTH_TYPE=DB の初期管理者） | 変数名が違えば初期管理者が既定値のままになる | 初回起動時に確認する。違っていれば `api_extra_environment` で修正する |
-| U3 | Keep backend のヘルスチェックパス（`/healthcheck`） | 違っていれば ALB がタスクを unhealthy と判定し続ける | `api_health_check_path` で変更できる |
-| U4 | Keep が AWS Secrets Manager に作るシークレットの名前プレフィックス | IAM の `secret:keep*` に一致しなければプロバイダの保存が失敗する | 初回にプロバイダを登録するときに確認する |
+| U1 | Keep の Redis クライアントが TLS に対応しているか | 未対応なら Valkey の通信暗号化を有効にできない（現状は無効で、SG で制限） | **一部解消**：Keep は `REDIS_SSL=true` で TLS 接続できる（`keep/keep/api/redis_settings.py:33`）。ElastiCache の証明書をイメージの CA ストアで検証できるかは未確認のため、初回構築時に `transit_encryption_enabled` と合わせて確かめる（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.2） |
+| U2 | `KEEP_DEFAULT_USERNAME` / `KEEP_DEFAULT_PASSWORD`（AUTH_TYPE=DB の初期管理者） | 変数名が違えば初期管理者が既定値のままになる | **解消**：変数名は正しい（`keep/keep/api/core/db_on_start.py:48-49`）（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.2） |
+| U3 | Keep backend のヘルスチェックパス（`/healthcheck`） | 違っていれば ALB がタスクを unhealthy と判定し続ける | **解消**：`GET /healthcheck` は認証なしで 200 を返す（`keep/keep/api/routes/healthcheck.py:6-14`、`keep/keep/api/api.py:294`）。UI 側は G9（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.2、§6） |
+| U4 | Keep が AWS Secrets Manager に作るシークレットの名前プレフィックス | IAM の `secret:keep*` に一致しなければプロバイダの保存が失敗する | **解消**：Keep が作る名前は `keep_*` と `keep-*` で `secret:keep*` に一致する。ただし IaC 自身の `keep/*` にも一致する（G5）。`AWS_KMS_KEY_ID` が未設定だと新規作成が失敗する（G11）（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.2、§6） |
 | U5 | Keep の arm64 イメージ（レビューの未確認事項） | Fargate の Graviton 化によるコスト削減が可否に左右される | `cpu_architecture` は変数化してある（既定 X86_64） |
 | U6 | ElastiCache の Valkey 8.0 が東京で使えるか | apply が失敗する | `cache_engine_version` で変更できる |
 | U7 | Regional NAT の手動モード（`availability_zone_address`）の挙動と単価 | EIP の固定とコスト表（レビュー 18 番） | 最初の apply で確認する |
-| U8 | Keep の 202 の意味（レビュー 17 番） | 設計上は 202 を信用しないため影響はない | Journal の状態は `KEEP_ACCEPTED`（受付）と呼んで区別している |
+| U8 | Keep の 202 の意味（レビュー 17 番） | 設計上は 202 を信用しないため影響はない | **解消**：`REDIS=true` では 202 は ARQ のジョブとして Valkey に積んだことを表す（`keep/keep/api/routes/alerts.py:748-781`）。`KEEP_ACCEPTED` はこの意味で使う（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §4.2） |
 | R1 | Alertmanager は 4xx を再試行しない | 誤ったブロックや設定ミスでの欠落 | WAF を COUNT にし、4XX と WAF ブロックのアラームを置き、Ingest は 5xx を返す |
 | U9 | v4 本文（`pagerduty_to_keep_architecture_summary_v4.md`）が未入手 | v4 の完了条件 1〜5 や critical 直送の要件（v4 7.x）との差異を突き合わせられていない | v4 を入手したら §4.1 と §12 を照合する |
 | U10 | 内製ツールの冪等性、キューの種類、タイムアウト | 重複通知や、可視性タイムアウト不足による二重処理 | 契約で `transitionId` による重複排除を求める。既定キューは FIFO で可視性タイムアウト 900 秒（変数で調整） |
-| U11 | Keep ワークフローの `{{ alert }}` が実行時に正しい JSON になるか（chevron の HTML エスケープ → Keep の `html.unescape`。値に実体参照や `keep.xxx(` を含むと変形や関数評価エラーの可能性） | non-critical の本文が壊れ、内製ツールが解釈できない | Keep の初回構築時にテストアラートを送り、本文を確認する |
-| U12 | Keep が重複として扱うイベント（Alertmanager の repeat による再送）でワークフローが起動するか | 起動すると non-critical の通知量が増える | GameDay で確認し、必要なら `only_on_change: [status]` の追加をユーザーが判断する |
-| U13 | amazonsqs プロバイダのスコープ検証メッセージ（`KEEP_SCOPE_TEST_MSG_PLEASE_IGNORE`）が送られる時機（登録時のみか、定期的か） | 内製ツールが破棄しないと誤通知になる | 契約で破棄を求める。初回登録時にキューを観察する |
-| U14 | SQS の `MessageGroupId` / `MessageDeduplicationId` の制約（長さ、文字種）とメッセージサイズの上限（AWS の一次情報源を未取得） | 制約を超えると送信が失敗する | fingerprint は `<source>:<16 桁 hex>` なので 128 文字以内に収まる見込み。AWS の SQS API リファレンスで確認する |
+| U11 | Keep ワークフローの `{{ alert }}` が実行時に正しい JSON になるか（chevron の HTML エスケープ → Keep の `html.unescape`。値に実体参照や `keep.xxx(` を含むと変形や関数評価エラーの可能性） | non-critical の本文が壊れ、内製ツールが解釈できない | **範囲を縮小**：`keep.` と括弧を含む値による関数評価の失敗は `raw_render_without_execution(...)` で避けられる（G4、別タスク）。実体参照や `{{` を含む値の変形は残るので初回構築時の確認は続ける（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §6） |
+| U12 | Keep が重複として扱うイベント（Alertmanager の repeat による再送）でワークフローが起動するか | 起動すると non-critical の通知量が増える | **解消**：同じ `startsAt` の firing の再送は ingest が重複として落とすため Keep に届かず、Keep 側でも完全な重複はワークフローの前で除かれる。`only_on_change` は不要（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §4.3、§5.1 C9） |
+| U13 | amazonsqs プロバイダのスコープ検証メッセージ（`KEEP_SCOPE_TEST_MSG_PLEASE_IGNORE`）が送られる時機（登録時のみか、定期的か） | 内製ツールが破棄しないと誤通知になる | **解消**：送られるのは登録、更新、手動の再検証、OAuth2 での登録のときだけで、定期的には送られない（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.1 C10）。内製ツールでの破棄は引き続き必要 |
+| U14 | SQS の `MessageGroupId` / `MessageDeduplicationId` の制約（長さ、文字種）とメッセージサイズの上限（AWS の一次情報源を未取得） | 制約を超えると送信が失敗する | **解消**：AWS のサービスモデル（botocore 1.38.9）では両 ID は 128 文字以内の英数字と記号、本文は 256 KiB 以内。`dedup_id` は `<source>` の長さ + 55 文字以内（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.1 C14） |
 | U15 | 配備する Keep のタグが、参照したソース（v0.54.3）と同じ挙動か | amazonsqs プロバイダ、AlertDto、CEL の前処理が変わると契約が崩れる | イメージのミラー時にソースの差分を確認する |
 | R4 | `critical_severities` を既定の `["critical"]` から広げると、Keep の severity（`labels.severity == "critical"` のときだけ critical）とずれる | そのアラートが critical 経路と non-critical 経路の両方に届く | 変数の description と契約に明記した。変えるときはワークフローの CEL も合わせる |
-| R3 | critical 経路で送信に失敗すると、そのレコードは Keep にも送られず再試行になる | 片方の経路が恒常的に落ちていると、そのアラートの Keep 反映が遅れる（critical はもう片方の経路で届く） | critical 配送を優先する設計判断。`router-errors` アラームで検知し、DLQ 行きになる前に対処する |
+| R3 | critical 経路で送信に失敗すると、そのレコードは Keep にも送られず再試行になる | 片方の経路が恒常的に落ちていると、そのアラートの Keep 反映が遅れる（critical はもう片方の経路で届く） | critical 配送を優先する設計判断。`router-errors` アラームで検知し、DLQ 行きになる前に対処する。ただし送信失敗はバッチ内の失敗として返すため `router-errors` では検知できない見込み。キューの滞留と DLQ のアラームで検知する（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §6 G12） |
 | R2 | 実 AWS での plan/apply は未実施 | provider の実際の挙動差（例：ACM の検証レコード） | タスク 5〜8 で段階的に apply する。モックによる `terraform test` で配線は検証済み |
+| R5 | Keep v0.54.3 のソースと Keep の設定・監視の食い違い（G1〜G12）、critical の 2 経路の送信順（G13） | G1〜G12 は、そのままでは non-critical の取りこぼしや遅延、初期設定の失敗が起きる（critical の配送には影響しない）。G13 では、内製ツール用キューへの送信が失敗すると SNS にも送られず、critical がどちらの経路にも届かない（R3 の「critical はもう片方の経路で届く」は、この向きでは成り立たない） | [`architecture-services-and-flow.md`](architecture-services-and-flow.md) §6 の是正タスクを、承認を得て別途行う。G13 は Alertmanager の receiver の追加前に行う |
 
 ## 15. 最終裁定
 

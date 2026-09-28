@@ -63,7 +63,7 @@ critical 以外のアラート（Keep の `severity` が `critical` でないも
 
 ## Keep のスコープ検証メッセージ
 
-Keep は amazonsqs プロバイダを登録するときに、本文が `KEEP_SCOPE_TEST_MSG_PLEASE_IGNORE`、`MessageGroupId` が `keep` のテストメッセージをキューへ送ります（`amazonsqs_provider.py` の `validate_scopes`）。内製ツールはこのメッセージを**処理せずに削除（成功扱い）**してください。いつ送られるか（登録時のみか、定期的か）は未確認です（U13）。
+Keep は amazonsqs プロバイダを登録するときに、本文が `KEEP_SCOPE_TEST_MSG_PLEASE_IGNORE`、`MessageGroupId` が `keep` のテストメッセージをキューへ送ります（`amazonsqs_provider.py` の `validate_scopes`）。内製ツールはこのメッセージを**処理せずに削除（成功扱い）**してください。送られるのは登録、更新、手動の再検証のときだけで、定期的には送られません（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.1 C10、U13）。
 
 ## 内製ツール側の設定（管理アカウント）
 
@@ -107,8 +107,8 @@ Keep がキューに送れていない場合（プロバイダ未登録、ワー
 
 番号は [`implementation-plan.md`](implementation-plan.md) §14 と共通です。
 
-- **U11**：`{{ alert }}` が実行時に正しい JSON になるか。ソース上は `AlertDto.__str__` → chevron の HTML エスケープ → Keep の `html.unescape` の順で JSON に戻りますが、値に `&lt;` などの実体参照や `keep.xxx(` のような文字列を含むと、変形や関数評価のエラーになる可能性があります。Keep の初回構築時にテストアラートを送り、本文を確認します。
-- **U12**：Alertmanager の再送（Keep が重複として扱うイベント）でワークフローが起動するか。起動する場合は通知量が増えるので、`only_on_change: [status]` を追加するかを判断します。GameDay で確認します。
-- **U13**：スコープ検証メッセージが送られる時機（登録時のみか、定期的か）。
-- **U14**：SQS の `MessageGroupId` / `MessageDeduplicationId` の長さと文字種の制約、メッセージサイズの上限。AWS の一次情報源を未取得です。fingerprint は `<source>:<16 桁の hex>` なので、128 文字以内に収まる見込みです。
+- **U11**：範囲を縮小しました。`keep.xxx(` のような文字列による関数評価のエラーは、ワークフローの本文を `raw_render_without_execution(...)` で包めば避けられます（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §6 G4、別タスク）。`&lt;` などの実体参照や `{{` を含む値の変形は残るため、Keep の初回構築時にテストアラートを送り、本文を確認します。
+- **U12**：解消しました。同じ `startsAt` の再送は ingest が重複として落とすため Keep に届かず、Keep 側でも完全な重複はワークフローの前で除かれます。`only_on_change` は不要です（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §4.3）。
+- **U13**：解消しました。スコープ検証メッセージは登録、更新、手動の再検証のときだけ送られます（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.1 C10）。
+- **U14**：解消しました。AWS のサービスモデル（botocore 1.38.9）では、両 ID は 128 文字以内の英数字と記号、本文は 256 KiB 以内です。`dedup_id` は `<source>` の長さ + 55 文字以内に収まります（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.1 C14）。
 - **U15**：配備する Keep のタグが v0.54.3 と同じ挙動か。イメージのミラー時にソースの差分を確認します。

@@ -7,6 +7,7 @@ PagerDuty から Keep への置き換えのうち、**フェーズ 1（東京 MV
 
 - Keep のインフラを追加する理由（背景と so that）：[`docs/why-keep.md`](docs/why-keep.md)
 - 計画書・前提確認・最終裁定：[`docs/implementation-plan.md`](docs/implementation-plan.md)
+- 利用サービス、アラート通知までの流れ、Keep ソースでの裏取りと裁定：[`docs/architecture-services-and-flow.md`](docs/architecture-services-and-flow.md)
 - 送信元（本番 / 管理 EKS）の設定：[`docs/alertmanager-receiver.md`](docs/alertmanager-receiver.md)
 - critical アラートの直送（内製ツール / SNS）の契約：[`docs/critical-notification-contract.md`](docs/critical-notification-contract.md)
 - critical 以外のアラート（Keep → SQS → 内製ツール）の契約：[`docs/non-critical-notification-contract.md`](docs/non-critical-notification-contract.md)
