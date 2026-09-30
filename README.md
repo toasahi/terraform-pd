@@ -17,11 +17,13 @@ PagerDuty から Keep への置き換えのうち、**フェーズ 1（東京 MV
 
 ![PagerDuty から Keep への置き換え Phase 1 東京 MVP の AWS アーキテクチャ](docs/architecture-phase1-tokyo.png)
 
+図の「Regional NAT + 固定 EIP」は古い内容です。外向き通信は現在、共有 Transit Gateway 経由です（図は描き直す予定です）。
+
 ## 構成
 
 ```
 modules/                       再利用モジュール（provider は設定しない。バージョンは下限のみ）
-  network/                     VPC、private サブネット、Regional NAT（EIP 固定）、ゲートウェイエンドポイント、フローログ
+  network/                     VPC、private サブネット、共有 Transit Gateway への既定ルート、ゲートウェイエンドポイント、フローログ
   container_registry/          ECR（Keep イメージのミラー先）
   alert_journal/               DynamoDB AlertEventJournal（NEW_AND_OLD_IMAGES、削除保護）
   alert_queues/                SQS FIFO + DLQ
@@ -62,7 +64,12 @@ helpers/                       build-lambda.sh、mirror-keep-images.sh
    mv backend.tf.off backend.tf && terraform init -backend-config=../backend.hcl -migrate-state
    ```
 
-2. **foundation**：`terraform apply`。出力の `nat_public_ips` は Keep の egress IP です。
+2. **foundation**：外向き通信は共有 Transit Gateway 経由です。VPC のアタッチメントはネットワーク側が作るので、2 回に分けて apply します。
+   1. `transit_gateway_id = null` のまま `terraform apply` します（既定ルートはまだ作りません）。
+   2. ネットワーク側に、VPC（出力 `vpc_id`、`private_subnet_ids`。AZ ごとに 1 サブネット）の共有 Transit Gateway へのアタッチメントと、Transit Gateway 側のルートの設定を依頼します。既定ルートを Transit Gateway に向けると、関連付けたルートテーブルにあるほかの VPC やオンプレミスにも届きうる（逆向きも）ので、このアタッチメント専用のルートテーブルもあわせて依頼します。中身は、集約出口への既定ルート、`operator_cidrs` への戻りのルート、私設アドレス（10.0.0.0/8、172.16.0.0/12、192.168.0.0/16。組織が使っていれば 100.64.0.0/10 も）のブラックホールルートだけで、ワークロード VPC からの伝播はなしです。専用のルートテーブルだけでは、私設アドレス宛てが集約出口の VPC で折り返してほかの VPC に届きうるので、ブラックホールルートが要ります（代わりに集約出口の側で落とす案もありますが、落とすかどうかは未確認です。詳細は [`docs/implementation-plan.md`](docs/implementation-plan.md) §14 R7）。
+   3. アタッチメントが `available` になり、専用のルートテーブルに関連付いていて、その中身がちょうど上の 3 種類（ブラックホールルートも含む）であることを読み取りで確かめたら（手順は計画書 §14 R7）、`terraform.tfvars` の `transit_gateway_id` に `tgw-...` を設定して、もう一度 apply します。アタッチメントが無いと precondition でエラーになります。
+   4. 外向きの IP は集約出口のもので、ネットワーク側が管理します。この IaC は出力しません。
+   5. Keep のタスクは ECR API と Secrets Manager への外向き通信を必要とします（インターフェースエンドポイントは無い。[`docs/architecture-services-and-flow.md`](docs/architecture-services-and-flow.md) §3.1）。手順 4（keep）の前に、この手順 2 を終えてください。
 3. **Keep イメージのミラー**：`helpers/mirror-keep-images.sh --version <tag> --account <id>` を実行し、表示された digest を `keep/terraform.tfvars` に設定します。
 4. **keep**：`terraform apply`。
 5. **Keep API キー**：Keep の UI で発行し、`aws secretsmanager put-secret-value --secret-id keep/api-key-dispatcher --secret-string <key>` で保存します。

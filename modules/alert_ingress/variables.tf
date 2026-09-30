@@ -20,7 +20,7 @@ variable "stage_name" {
 }
 
 variable "allowed_source_cidrs" {
-  description = "Public IPv4 CIDRs allowed to call the endpoint (NAT egress IPs of the prod / management EKS VPCs)."
+  description = "Public IPv4 CIDRs allowed to call the endpoint (central egress IPs behind the shared transit gateway; every workload behind that egress passes this layer)."
   type        = list(string)
 
   validation {

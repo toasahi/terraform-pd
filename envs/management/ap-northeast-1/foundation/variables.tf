@@ -22,3 +22,8 @@ variable "private_subnets" {
   description = "Private subnets keyed by availability zone."
   type        = map(string)
 }
+
+variable "transit_gateway_id" {
+  description = "ID of the shared transit gateway that the private default route (0.0.0.0/0) points to. The network team attaches the VPC to it. Use null until the attachment is available."
+  type        = string
+}

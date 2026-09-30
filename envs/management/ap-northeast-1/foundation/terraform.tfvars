@@ -9,3 +9,7 @@ private_subnets = {
   "ap-northeast-1c" = "10.40.4.0/22"
   "ap-northeast-1d" = "10.40.8.0/22"
 }
+
+# Shared transit gateway for egress. Keep null for the first apply; set "tgw-..." after the network
+# team has attached the VPC (README, step 2).
+transit_gateway_id = null

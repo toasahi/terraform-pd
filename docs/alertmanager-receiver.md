@@ -2,12 +2,14 @@
 
 受信口 `https://alerts.<zone>/v1/alerts/<source>` にアラートを送るための、送信側の設定です。対象の送信元は `prod`（本番アカウントの EKS）と `management`（管理アカウントの EKS）の 2 つだけです。
 
-## 1. 送信元の egress IP を固定し、登録する
+## 1. 送信元が通る集約出口の IP を登録する
 
-WAF の IP セットとリソースポリシーは、送信元の NAT の egress IP だけを許可します。
+WAF の IP セットとリソースポリシーは、`alert_sources` に登録した egress IP だけを許可します。
 
-1. 各 EKS VPC の NAT Gateway に**固定の EIP**を割り当てます。Regional NAT の自動モードではアドレスが増えることがあるため、手動モード（`availability_zone_address`）にするか、ゾーナル NAT を使います。
-2. `envs/management/ap-northeast-1/alert-pipeline/terraform.tfvars` の `alert_sources.<source>.egress_cidrs` に `/32` で登録し、apply します。
+1. 本番 EKS と管理 EKS は、どちらも共有 Transit Gateway の先にある集約出口から外に出ます。集約出口の固定のパブリック IP を、ネットワーク側に確認します。
+2. 同じ IP を `/32` で、`envs/management/ap-northeast-1/alert-pipeline/terraform.tfvars` の `alert_sources.prod.egress_cidrs` と `alert_sources.management.egress_cidrs` の両方に登録し、apply します。
+
+> IP の層では本番と管理を区別できません。集約出口の背後にあるほかのワークロード（開発やステージングを含む）も、この層を通過します。送信元の識別は URL のパスとトークン（§2）で行います。集約出口の IP が変わるときは、新しい IP を先に追加し、切り替わった後で古い IP を外します。
 
 > 許可リストから漏れると WAF が 403 を返します。**Alertmanager は 4xx を再試行しない**ため、その通知は欠落します。`alert-pipeline-waf-blocked-requests` アラームで検知します。
 

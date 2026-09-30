@@ -42,5 +42,5 @@ PagerDuty で使っているグローバルオーケストレーターとサー�
 
 ## 4. 留意点
 
-- Keep のセルフホストには AWS の利用料（ECS Fargate、RDS、ElastiCache、NAT、Lambda など）と運用の手間がかかる。PagerDuty の年間コストとの比較は、フェーズ 1 の実環境で費用を確認してから行う。
+- Keep のセルフホストには AWS の利用料（ECS Fargate、RDS、ElastiCache、Transit Gateway 経由の通信（課金の負担区分は**未確認**。ネットワーク側に確認する）、Lambda など）と運用の手間がかかる。PagerDuty の年間コストとの比較は、フェーズ 1 の実環境で費用を確認してから行う。
 - 今後オンコール管理やポストモーテムの要件が PagerDuty に寄る場合（別ツールをやめる場合など）は、この判断を見直す。

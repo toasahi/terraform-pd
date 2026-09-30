@@ -1,6 +1,7 @@
 # PagerDuty → Keep 置き換え フェーズ 1（東京 MVP）IaC 実装計画書
 
 - 作成日: 2026-09-23
+- 更新: 2026-09-30 外向き通信を共有 Transit Gateway 経由に変更（§6.1、§14 U7・U16・R6・R7）
 - 対象: `pagerduty_to_keep_architecture_review_v4.md`（v4 に対するレビュー、裁定「条件付き Go」）
   - v4 本文（`pagerduty_to_keep_architecture_summary_v4.md`）は未入手。v4 の節番号はレビューに書かれている引用に基づく（§14 U9）
 - 対象範囲: **フェーズ 1（東京 MVP）の IaC**。大阪 DR（フェーズ 3）は「後から変えない前提」の担保のみを行う
@@ -16,7 +17,7 @@
 | 項目 | 内容 |
 |---|---|
 | 目的 | レビュー v4 の条件付き Go を受け、フェーズ 1（東京 MVP）の受信パイプラインと Keep 基盤を Terraform でコード化する。修正必須事項（REST API への変更など）をコードで担保する |
-| 範囲内 | 次の要素を管理アカウント（ap-northeast-1）に作る <br>- 受信口（API Gateway REST + WAF + Lambda オーソライザ）<br>- Journal（DynamoDB）<br>- FIFO キュー<br>- Lambda 4 本（TypeScript + Effect / Node.js 24）<br>- critical 直送（SNS）<br>- Keep（ECS Fargate、RDS PostgreSQL、ElastiCache Valkey、internal ALB）<br>- ネットワーク（Regional NAT）<br>- 監視<br>- tfstate 基盤 |
+| 範囲内 | 次の要素を管理アカウント（ap-northeast-1）に作る <br>- 受信口（API Gateway REST + WAF + Lambda オーソライザ）<br>- Journal（DynamoDB）<br>- FIFO キュー<br>- Lambda 4 本（TypeScript + Effect / Node.js 24）<br>- critical 直送（SNS）<br>- Keep（ECS Fargate、RDS PostgreSQL、ElastiCache Valkey、internal ALB）<br>- ネットワーク（private サブネットの既定ルートを共有 Transit Gateway に向ける。アタッチメントはネットワーク側）<br>- 監視<br>- tfstate 基盤 |
 | 範囲外 | 次の 3 つ（3 つ目には例外あり） <br>- 大阪 DR の実リソース（フェーズ 3）<br>- 送信元（本番 EKS と管理 EKS）の Alertmanager 設定そのもの（設定例は `docs/alertmanager-receiver.md`）<br>- Keep のワークフロー定義（YAML）。ただし non-critical を内製ツールへ送る 1 本（`keep-workflows/non-critical-to-inhouse.yaml`）だけは範囲内とする（Keep への反映は人が行う。§4.2） |
 | 前提 | アカウントは開発、ステージング、本番、管理の 4 つ。アラートの送信元は **本番 EKS と管理 EKS のみ**で、**管理アカウントの ECS（Keep）に集約**する |
 
@@ -31,7 +32,7 @@
 | 5 | SQS FIFO の重複排除は 5 分 | `modules/alert_queues`。重複排除の本体は Journal の Conditional Put（`lambda/src/lib/journal.ts`） |
 | 6 | Lambda/SQS のイベントソースは同一リージョンに限られる | 各リージョンの `alert-pipeline` ルートに、キューと Lambda を同居させる |
 | 7 | Route 53 は CloudWatch アラーム型のヘルスチェックが使える | `modules/alert_ingress/domain.tf` のコメントで、フェーズ 3 の切り替え方式を固定している |
-| 8 | Regional NAT Gateway | `modules/network`（`availability_mode = "regional"`） |
+| 8 | Regional NAT Gateway | 採用しない。外向き通信は共有 Transit Gateway 経由（§6.1） |
 | 12 | DynamoDB Streams は `NEW_AND_OLD_IMAGES` にする | `modules/alert_journal`（テストで固定） |
 | 14 | Keep の amazonsqs アクション | `keep_platform` の `sqs_send_queue_arns` で送信権限を付与する |
 
@@ -46,10 +47,11 @@
 | E | Alertmanager の webhook は **5xx のみ再試行し、429 を含む 4xx は再試行しない** | `prometheus/alertmanager` の `notify/util.go`（Retrier）、`notify/webhook/webhook.go` | Ingest の内部失敗は必ず 5xx で返す。WAF のレート制限とマネージドルールは COUNT を既定にする。4xx と WAF ブロックは即アラーム |
 | F | SQS ESM の `scaling_config.maximum_concurrency` は SQS 専用で、最小 2・最大 1000。FIFO ではメッセージグループ数との小さい方で頭打ちになる。予約同時実行数はこの値以上にする必要がある | botocore Lambda モデル（ScalingConfig）、terraform-provider-aws のドキュメント。FIFO と予約同時実行数に関する文言は AWS 開発者ガイドの検索抜粋（本文は未取得） | Dispatcher の同時実行上限を ESM 側で持つ（既定 3、2〜5 を validation で強制）。予約同時実行数がこれ以上であることも validation で強制する |
 | G | ECR プルスルーキャッシュの上流に Google Artifact Registry（`*.pkg.dev`）は含まれない | botocore ECR モデル（UpstreamRegistry の enum） | `helpers/mirror-keep-images.sh`（crane）でミラーし、digest で固定する |
-| H | aws provider の Regional NAT 対応は v6.24.0 から。最新は v6.66.0 | `hashicorp/terraform-provider-aws` の CHANGELOG と `r/nat_gateway` のドキュメント | モジュールは `>= 6.24`、ルートは `~> 6.66` |
+| H | aws provider の Regional NAT 対応は v6.24.0 から。最新は v6.66.0 | `hashicorp/terraform-provider-aws` の CHANGELOG と `r/nat_gateway` のドキュメント | Regional NAT は採用をやめた（§6.1）。モジュールは `>= 6.0`、ルートは `~> 6.66` |
 | I | S3 backend のネイティブロック（`use_lockfile`）は Terraform 1.10 で導入、1.11 で GA。DynamoDB ロックは非推奨 | `hashicorp/terraform` の CHANGELOG（v1.10 / v1.11） | `backend.hcl` で `use_lockfile = true`。CLI は 1.16.4 |
 | J | WAF の関連付け先は REST API のステージのみ（HTTP API は不可） | terraform-provider-aws `r/wafv2_web_acl_association`、AWS の HTTP API と REST API の比較表 | `modules/alert_ingress` は REST（Regional）に固定 |
 | K | 書き込み専用引数（`password_wo`、`secret_string_wo`）と ephemeral の `random_password` が使える | aws provider 6.66.0 と random 3.9.1 の provider schema（`terraform providers schema -json`） | 秘密値を plan や state に残さない（`keep_platform/secrets.tf`） |
+| L | `aws_route` の `transit_gateway_id` は任意の文字列引数である。ターゲットの変更は `ReplaceRoute` でその場で行い、ForceNew ではない。`CreateRoute` は `InvalidTransitGatewayID.NotFound` のとき、create のタイムアウト（既定 5 分）まで再試行する。EC2 の `CreateTransitGatewayVpcAttachment` は「To send VPC traffic to an attached transit gateway, add a route to the VPC route table using CreateRoute」とし、サブネットは AZ ごとに 1 つまでである。`DescribeTransitGatewayVpcAttachments` は `vpc-id`、`transit-gateway-id`、`state` のフィルタを持ち、`aws_ec2_transit_gateway_vpc_attachments` は一致が無いときエラーではなく空の `ids` を返す | hashicorp/terraform-provider-aws v6.66.0 の `internal/service/ec2/vpc_route.go`、`d/ec2_transit_gateway_vpc_attachments` のドキュメントとソース（`transitgateway_vpc_attachments_data_source.go`、`find.go`）、aws provider 6.66.0 の provider schema、botocore 1.38.9 の EC2 モデル。アタッチメントの前の `CreateRoute` の挙動は未確認（U16） | `transit_gateway_id` を null 許容にし（null の間は既定ルートを作らない）、既定ルートには `available` のアタッチメントを求める precondition を付ける（`modules/network`） |
 
 **不採用の経緯**: 当初は Lambda ランタイムに Bun を検討したが、ユーザー判断により Node.js（マネージド）に変更した。なお、`oven-sh/bun` の `packages/bun-lambda` レイヤーには 2 つの問題があることをソース（`runtime.ts`）で確認している。非 HTTP イベントでは handler の例外を成功として扱い、SQS のメッセージが消える。また、REST の REQUEST オーソライザに応答できない。
 
@@ -57,10 +59,10 @@
 
 ```
 ┌──────────────── 本番アカウント ────────────────┐   ┌─────────── 管理アカウント (ap-northeast-1) ───────────┐
-│ EKS  ─ Alertmanager ─(NAT 固定 EIP)────────────┼──▶│ Route53 alerts.<zone> → API GW REST + WAF          │
+│ EKS  ─ Alertmanager ─(TGW 集約出口)────────────┼──▶│ Route53 alerts.<zone> → API GW REST + WAF          │
 └────────────────────────────────────────────────┘   │   → authorizer λ → ingest λ → Journal / alerts.fifo  │
 ┌──────────────── 管理アカウント ────────────────┐   │   → router λ ─┬→ 内製ツール用 SQS → 内製ツール λ  │
-│ EKS  ─ Alertmanager ─(NAT 固定 EIP)────────────┼──▶│               ├→ SNS critical-direct（メール等） │
+│ EKS  ─ Alertmanager ─(TGW 集約出口)────────────┼──▶│               ├→ SNS critical-direct（メール等） │
 └────────────────────────────────────────────────┘   │               └→ keep-delivery.fifo               │
   開発 / ステージング: 送信しない                     │   → dispatcher λ(VPC) → internal ALB → Keep(ECS)    │
                                                       │   Keep: RDS PostgreSQL / ElastiCache Valkey          │
@@ -70,7 +72,7 @@
 ```
 
 - Keep、受信パイプライン、Route 53 ホストゾーン、フェーズ 3 の canary アラームは、すべて**管理アカウント**に置く。レビュー 3.4 の指摘どおり、Route 53 はクロスアカウントの CloudWatch アラームを扱えないため。
-- 送信元の識別は URL のパス（`/v1/alerts/prod`、`/v1/alerts/management`）と送信元ごとのトークンで行う。ネットワーク上の制限として、WAF の IP セットとリソースポリシーに送信元 NAT の EIP を登録する。
+- 送信元の識別は URL のパス（`/v1/alerts/prod`、`/v1/alerts/management`）と送信元ごとのトークンで行う。ネットワーク上の制限として、WAF の IP セットとリソースポリシーに、送信元が通る集約出口（共有 Transit Gateway の先）のパブリック IP を登録する。本番と管理は同じ集約出口を通るので IP では区別できず、その背後のほかのワークロード（開発、ステージングを含む）も IP の層を通過する。送信元の識別と実質の制御は、パスと送信元ごとのトークンである（§14 R6）。
 
 ## 4. 全体構成とデータフロー
 
@@ -159,7 +161,7 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 
 | モジュール | 主なリソース | 要点 |
 |---|---|---|
-| `network` | VPC、private サブネット ×3、IGW、Regional NAT（AZ ごとに EIP を固定）、S3/DynamoDB ゲートウェイエンドポイント、フローログ | NAT の EIP を固定し、egress IP を安定させる（外部 SaaS の許可リストに登録するため） |
+| `network` | VPC、private サブネット ×3、既定ルート（0.0.0.0/0 → 共有 Transit Gateway）、S3/DynamoDB ゲートウェイエンドポイント、フローログ | IGW、NAT、EIP は持たない。VPC のアタッチメントと Transit Gateway 側のルートはネットワーク側が作る。既定ルートは `transit_gateway_id` を設定し、アタッチメントが `available` のときだけ作る（precondition、事実 L）。外向きの IP は集約出口のもので、ネットワーク側が管理する。運用者のネットワーク（`alb_ingress_cidrs`）への戻りの通信も 0.0.0.0/0 → Transit Gateway に従うので、internal ALB への到達は Transit Gateway 側のルートに依存する。NAT のときと違い、VPC の外の私設アドレス宛ての通信もインターネットで捨てられず、Transit Gateway 側のルートテーブルにある宛先（ほかの VPC やオンプレミス）に届きうる。逆向きにそれらからこの VPC にも届く（受け口は SG で制限される）。到達範囲は未確認（§14 R7） |
 | `container_registry` | ECR（IMMUTABLE、KMS、スキャン、ライフサイクル） | Keep イメージのミラー先 |
 | `alert_journal` | DynamoDB `AlertEventJournal` | 次の設定を最初から固定する（グローバルテーブル化の前提）<br>- `NEW_AND_OLD_IMAGES`<br>- オンデマンド<br>- PITR<br>- TTL<br>- 削除保護<br>- GSI `state-updated_at` |
 | `alert_queues` | FIFO キュー + DLQ（キーごとに生成） | 高スループット FIFO（`perMessageGroupId`）、SSE-SQS、redrive allow policy |
@@ -174,8 +176,10 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 |---|---|---|---|
 | 0 | `bootstrap` | tfstate 用の S3 バケット。初回はローカル state で作り、その後 S3 に移行する | なし |
 | 1 | `foundation` | `network`、`container_registry` | bootstrap |
+| 1a | （ネットワーク側） | VPC アタッチメントと Transit Gateway 側のルート（サブネットは出力 `private_subnet_ids`） | foundation |
+| 1b | `foundation` | `transit_gateway_id` を設定して再 apply（既定ルートを作る） | 1a |
 | 2 | （手作業） | `helpers/mirror-keep-images.sh` で Keep イメージをミラーし、digest を控える | foundation |
-| 3 | `keep` | `keep_platform`、non-critical 用キュー `keep-non-critical-inhouse.fifo`（+ DLQ） | foundation |
+| 3 | `keep` | `keep_platform`、non-critical 用キュー `keep-non-critical-inhouse.fifo`（+ DLQ） | 1b |
 | 4 | （手作業） | Keep で API キーを発行し、`keep/api-key-dispatcher` に保存する | keep |
 | 4a | （手作業） | Keep に amazonsqs プロバイダ `inhouse-non-critical`（`sqs_queue_url` は出力 `non_critical_inhouse_queue_url`、アクセスキーは空欄）を登録し、`keep-workflows/non-critical-to-inhouse.yaml` を反映する | keep |
 | 5 | `alert-pipeline` | Journal、キュー（内製ツール用を含む）、Lambda ×4、ingress、SNS、監視（keep ルートの non-critical キューのアラームを含む） | foundation、keep、`lambda/dist/lambda.zip` |
@@ -211,7 +215,7 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 ## 9. セキュリティ
 
 - **受信口の多層防御**:
-  1. WAF（既定 BLOCK、IP セットで ALLOW）
+  1. WAF（既定 BLOCK、IP セットで ALLOW）。IP は集約出口のもので、背後の全ワークロードが通過する。送信元の区別はトークンで行う
   2. リソースポリシー（NotIpAddress で Deny）
   3. REQUEST オーソライザ（送信元ごとのトークン。保存するのは digest のみ。ローテーション用に複数の digest を登録できる）
   4. パスの送信元とオーソライザの判定結果が一致するかを Ingest で再確認（403）
@@ -237,7 +241,7 @@ Alertmanager --(HTTPS, Authorization: Bearer <送信元トークン>)-->
 | Lambda ×4 | Errors > 0 | ハンドラの失敗 |
 | dispatcher | Throttles > 0 | 予約同時実行数の不足 |
 | API Gateway | 4XX > 0、5XX > 0 | 4xx は**再試行されない欠落**、5xx は再試行中 |
-| WAF | BlockedRequests > 0 | 許可リストの漏れ（送信元 NAT の IP 変更など） |
+| WAF | BlockedRequests > 0 | 許可リストの漏れ（集約出口の IP 変更など） |
 | ECS | RunningTaskCount < desired | Keep の縮退 |
 
 ## 11. 実装タスク（WBS）
@@ -290,7 +294,7 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 | U4 | Keep が AWS Secrets Manager に作るシークレットの名前プレフィックス | IAM の `secret:keep*` に一致しなければプロバイダの保存が失敗する | **解消**：Keep が作る名前は `keep_*` と `keep-*` で `secret:keep*` に一致する。ただし IaC 自身の `keep/*` にも一致する（G5）。`AWS_KMS_KEY_ID` が未設定だと新規作成が失敗する（G11）（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §5.2、§6） |
 | U5 | Keep の arm64 イメージ（レビューの未確認事項） | Fargate の Graviton 化によるコスト削減が可否に左右される | `cpu_architecture` は変数化してある（既定 X86_64） |
 | U6 | ElastiCache の Valkey 8.0 が東京で使えるか | apply が失敗する | `cache_engine_version` で変更できる |
-| U7 | Regional NAT の手動モード（`availability_zone_address`）の挙動と単価 | EIP の固定とコスト表（レビュー 18 番） | 最初の apply で確認する |
+| U7 | Regional NAT の手動モード（`availability_zone_address`）の挙動と単価 | EIP の固定とコスト表（レビュー 18 番） | **対象外**：Regional NAT を使わなくなった（§6.1） |
 | U8 | Keep の 202 の意味（レビュー 17 番） | 設計上は 202 を信用しないため影響はない | **解消**：`REDIS=true` では 202 は ARQ のジョブとして Valkey に積んだことを表す（`keep/keep/api/routes/alerts.py:748-781`）。`KEEP_ACCEPTED` はこの意味で使う（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §4.2） |
 | R1 | Alertmanager は 4xx を再試行しない | 誤ったブロックや設定ミスでの欠落 | WAF を COUNT にし、4XX と WAF ブロックのアラームを置き、Ingest は 5xx を返す |
 | U9 | v4 本文（`pagerduty_to_keep_architecture_summary_v4.md`）が未入手 | v4 の完了条件 1〜5 や critical 直送の要件（v4 7.x）との差異を突き合わせられていない | v4 を入手したら §4.1 と §12 を照合する |
@@ -304,6 +308,9 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 | R3 | critical 経路で送信に失敗すると、そのレコードは Keep にも送られず再試行になる | 片方の経路が恒常的に落ちていると、そのアラートの Keep 反映が遅れる（critical はもう片方の経路で届く） | critical 配送を優先する設計判断。`router-errors` アラームで検知し、DLQ 行きになる前に対処する。ただし送信失敗はバッチ内の失敗として返すため `router-errors` では検知できない見込み。キューの滞留と DLQ のアラームで検知する（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §6 G12） |
 | R2 | 実 AWS での plan/apply は未実施 | provider の実際の挙動差（例：ACM の検証レコード） | タスク 5〜8 で段階的に apply する。モックによる `terraform test` で配線は検証済み |
 | R5 | Keep v0.54.3 のソースと Keep の設定・監視の食い違い（G1〜G12）、critical の 2 経路の送信順（G13） | G1〜G12 は、そのままでは non-critical の取りこぼしや遅延、初期設定の失敗が起きる（critical の配送には影響しない）。G13 では、内製ツール用キューへの送信が失敗すると SNS にも送られず、critical がどちらの経路にも届かない（R3 の「critical はもう片方の経路で届く」は、この向きでは成り立たない） | [`architecture-services-and-flow.md`](architecture-services-and-flow.md) §6 の是正タスクを、承認を得て別途行う。G13 は Alertmanager の receiver の追加前に行う |
+| U16 | 共有 Transit Gateway 経由の外向き通信（事実 L）：(a) アタッチメントの前の `CreateRoute` の挙動（エラーになるか、ブラックホールのルートを受け付けるか）、(b) ネットワーク側が作ったアタッチメントが、管理アカウントの `DescribeTransitGatewayVpcAttachments` で見えるか（どのアカウントから作るか）、(c) S3 / DynamoDB のゲートウェイエンドポイントのルート（プレフィックスリスト）が 0.0.0.0/0 → Transit Gateway より優先されるか（`CreateRoute` の説明は「most specific match」。プレフィックスリストの優先順位の記述は VPC ユーザーガイドで未確認）、(d) 集約出口の IP の数、安定性、変更の通知と、Transit Gateway のアタッチメントとデータ処理の単価と負担区分 | (a) precondition があるので、設計は答えに依存しない。(b) 見えないと precondition で既定ルートを作れない。(c) 優先されないと、S3 と DynamoDB の通信も Transit Gateway を通り、データ処理の料金がかかる。(d) IP が変わると許可リストから漏れ、通知が 403 で欠落する（R1） | (a) VPC / Transit Gateway のユーザーガイドを参照できたら確かめる。できなければ最初の apply で観察する。(b) 2 回目の apply（§6.2 の 1b）の前に、読み取りの `aws ec2 describe-transit-gateway-vpc-attachments --filters Name=vpc-id,Values=<vpc>` で確かめる。見えなければ対応をユーザーが決める。(c) apply の後にフローログで確かめる。(d) ネットワーク側に確認する |
+| R6 | IP の許可リスト（WAF、リソースポリシー）は、集約出口の背後の全ワークロードに共通になる。本番と管理も IP では区別できない | 漏れたトークンは、集約出口の背後のどこからでも使える（防御の層が 1 つ減る） | 送信元ごとのトークン（オーソライザが sha256 の digest で照合する）と、Ingest でのパスとオーソライザの判定の再確認（§9 の 4）で送信元を区別する。トークンをローテーションする。WAF と 4XX のアラームは残す |
+| R7 | 0.0.0.0/0 → 共有 Transit Gateway で届く範囲は、このアタッチメントに関連付けた Transit Gateway のルートテーブル（ネットワーク側の管理）で決まり、**未確認**である。NAT のときは、VPC の外の私設アドレス宛ての通信はインターネットに出て届かなかった。今は、そのルートテーブルにある宛先（ほかのアカウントの VPC、オンプレミスなど）すべてに届きうる。逆向きに、それらのネットワークからこの VPC にも届く | Keep のタスクと dispatcher の SG は tcp/443 を 0.0.0.0/0 に許可する（`modules/keep_platform/security_groups.tf:61-68`、`envs/management/ap-northeast-1/alert-pipeline/functions.tf:147-154`）。侵害された、または設定を誤った Keep（ワークフローの HTTP / webhook の送信、テレメトリ（[`architecture-services-and-flow.md`](architecture-services-and-flow.md) §6 G7））から、ほかのネットワークの内部の HTTPS エンドポイント（EKS の API サーバーなど）に接続できうる。逆向きの受け口は SG で制限される（ALB は VPC の CIDR と `operator_cidrs` の 443 だけ、タスク、RDS、Valkey は SG の参照だけ） | ネットワーク側に、このアタッチメント専用の Transit Gateway ルートテーブルを依頼する。ただし専用のルートテーブルだけでは足りない。そこに無い私設アドレス宛ても既定ルートで集約出口の VPC に入り、集約出口の VPC が各 VPC の CIDR を Transit Gateway に戻す構成（AWS の Transit Gateway ガイドの集約出口の例。ガイドは VPC ごとのブラックホールルートで VPC 間の通信を止められるとする）なら、そこから Transit Gateway を折り返してほかの VPC に届きうる。集約出口の構成は未確認である。そこでルートテーブルの中身は、(1) 集約出口への既定ルート 0.0.0.0/0、(2) `operator_cidrs` への戻りのルート、(3) 私設アドレス 10.0.0.0/8、172.16.0.0/12、192.168.0.0/16（組織が使っていれば 100.64.0.0/10 も）のブラックホールルート、だけとし、ワークロード VPC からの伝播（propagation）は受けない、と依頼する。Transit Gateway は最も長く一致するルートを選ぶので、(2) が (3) より狭ければ (2) が勝つ。`operator_cidrs` に (3) と同じか広い CIDR があれば、対応をユーザーが決める。(3) の代わりに、集約出口の VPC かファイアウォールが私設アドレス宛てを落とす、でもよい。ただしその場合は、落とすことをネットワーク側に確かめる（未確認）。§6.2 の 1b の前に、読み取りで確かめる：`aws ec2 describe-transit-gateway-attachments --filters Name=resource-id,Values=<vpc>` で関連付けたルートテーブルを見る。`aws ec2 get-transit-gateway-route-table-propagations --transit-gateway-route-table-id <rtb>` でワークロード VPC からの伝播が無いことを見る。`aws ec2 search-transit-gateway-routes --transit-gateway-route-table-id <rtb> --filters Name=state,Values=active,blackhole` で、ルートがちょうど (1)〜(3) であることを見る（`active` だけではブラックホールルートが表示されない）。この API はページ分割しない（既定で最大 1000 件）ので、`AdditionalRoutesAvailable` が `true` なら一覧が切れている。管理アカウントから見えるかは U16 (b) と同じく未確認。見えないか、中身が (1)〜(3) と違えば、対応をユーザーが決める。Keep のタスクと dispatcher の SG の外向きを絞るのは任意 |
 
 ## 15. 最終裁定
 
@@ -311,7 +318,7 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 
 **条件**
 1. Keep のイメージは ECR にミラーし、digest で固定したうえで適用する（`helpers/mirror-keep-images.sh`）。
-2. 送信元 EKS の NAT の egress IP を固定し、`alert_sources` に登録してから Alertmanager の receiver を追加する。WAF と 4XX のアラームを先に有効にしておく。
+2. 送信元 EKS が通る集約出口のパブリック IP（ネットワーク側から入手する）を、`alert_sources` の両方の送信元に登録してから Alertmanager の receiver を追加する。WAF と 4XX のアラームを先に有効にしておく。
 3. 完了条件 6（scheduler の二重実行）と 7（復旧時のバースト）を §12 の手順で検証し、結果に応じて `enable_dedicated_scheduler` と `dispatcher_maximum_concurrency` を確定する。
 4. §14 の U1〜U4 を初回構築時に確認し、必要なら変数で是正する。
 5. 内製ツール側でイベントソース、IAM、`transitionId` による重複排除を実装し、完了条件 8（片方の経路が止まってももう片方に届く）を GameDay で確認する（U10）。
@@ -353,6 +360,9 @@ v4 の完了条件 1〜5（v4 本文 9.1）に、レビューで追加された 
 - Google Cloud: Terraform ベストプラクティス（全般的なスタイルと構造、ルートモジュール、再利用可能なモジュール、セキュリティ、オペレーション）— https://docs.cloud.google.com/docs/terraform/best-practices/general-style-structure?hl=ja
 - botocore サービスモデル（Lambda の Runtime / ScalingConfig、ECR の UpstreamRegistry）— https://github.com/boto/botocore/tree/develop/botocore/data
 - hashicorp/terraform-provider-aws（CHANGELOG 6.24.0、`r/nat_gateway`、`r/wafv2_web_acl_association`、`r/lambda_event_source_mapping`、`r/dynamodb_table`）— https://github.com/hashicorp/terraform-provider-aws
+- hashicorp/terraform-provider-aws v6.66.0（事実 L）：`internal/service/ec2/vpc_route.go`、`internal/service/ec2/transitgateway_vpc_attachments_data_source.go`、`internal/service/ec2/find.go`、`website/docs/d/ec2_transit_gateway_vpc_attachments.html.markdown`。aws provider 6.66.0 の provider schema（`terraform providers schema -json`）— https://github.com/hashicorp/terraform-provider-aws/tree/v6.66.0
+- botocore 1.38.9 の EC2 モデル（事実 L）：`CreateRoute`、`CreateTransitGatewayVpcAttachment`、`DescribeTransitGatewayVpcAttachments`、R7 の確認手順：`DescribeTransitGatewayAttachments`、`GetTransitGatewayRouteTablePropagations`、`SearchTransitGatewayRoutes`（`state` フィルタの `active` / `blackhole`、`MaxResults` の既定 1000、`NextToken` が無く結果に `AdditionalRoutesAvailable` があること）（`botocore/data/ec2/2016-11-15/service-2.json`）— https://github.com/boto/botocore/tree/1.38.9
+- AWS Transit Gateway ガイド（R7）：「Example: Centralized outbound routing to the internet」（`doc_source/transit-gateway-nat-igw.md`。集約出口の VPC が各 VPC の CIDR を Transit Gateway に戻すこと、VPC ごとのブラックホールルートで VPC 間の通信を止められること）、「Route evaluation order」（`doc_source/how-transit-gateways-work.md`。最も長く一致するルートが優先）— https://github.com/awsdocs/aws-transit-gateway-guide/tree/master/doc_source
 - hashicorp/terraform CHANGELOG v1.10 / v1.11（S3 のネイティブロック）— https://github.com/hashicorp/terraform
 - keephq/keep（`keep/api/routes/alerts.py`、`keep/identitymanager/authverifierbase.py`、`keep/providers/prometheus_provider/prometheus_provider.py`、`docs/deployment/configuration.mdx`）— https://github.com/keephq/keep
 - keephq/keep v0.54.3（non-critical 経路、§4.2）：`keep/providers/amazonsqs_provider/amazonsqs_provider.py`（`_notify`、`validate_scopes`、`start_consume`）、`keep/api/models/alert.py`（`AlertDto.__str__`）、`keep/iohandler/iohandler.py`（`render_context`、`_render`）、`keep/api/utils/cel_utils.py`、`keep/event_subscriber/event_subscriber.py`、`docs/workflows/syntax/triggers.mdx`、`docs/providers/documentation/amazonsqs-provider.mdx`— https://github.com/keephq/keep/tree/v0.54.3

@@ -17,13 +17,3 @@ output "private_route_table_id" {
   description = "ID of the private route table."
   value       = aws_route_table.private.id
 }
-
-output "nat_gateway_id" {
-  description = "ID of the Regional NAT Gateway."
-  value       = aws_nat_gateway.main.id
-}
-
-output "nat_public_ips" {
-  description = "Egress public IPs of the Regional NAT Gateway (one per AZ)."
-  value       = [for az in sort(keys(aws_eip.nat)) : aws_eip.nat[az].public_ip]
-}

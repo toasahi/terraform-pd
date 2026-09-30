@@ -35,3 +35,13 @@ variable "gateway_endpoint_services" {
   type        = set(string)
   default     = ["s3", "dynamodb"]
 }
+
+variable "transit_gateway_id" {
+  description = "ID of the shared transit gateway that the private default route (0.0.0.0/0) points to. The network team attaches the VPC to it. Use null until the attachment is available."
+  type        = string
+
+  validation {
+    condition     = var.transit_gateway_id == null || can(regex("^tgw-[0-9a-f]+$", var.transit_gateway_id))
+    error_message = "transit_gateway_id must be null or a transit gateway ID (tgw-...)."
+  }
+}

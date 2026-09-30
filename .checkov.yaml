@@ -13,7 +13,6 @@ skip-check:
   - CKV2_AWS_53   # API Gateway request validation: the ingest Lambda validates with Effect Schema
   - CKV_AWS_173   # Lambda env encryption: environment holds no secrets (IDs / ARNs only)
   - CKV_AWS_378   # HTTP target groups: TLS terminates at the internal ALB inside the VPC
-  - CKV2_AWS_19   # EIPs are attached to the Regional NAT Gateway (not EC2)
   - CKV2_AWS_5    # Dispatcher SG is attached to the Lambda function in the same root
   - CKV_AWS_109   # KMS key policy: standard account-root statement
   - CKV_AWS_111   # KMS key policy: standard account-root statement

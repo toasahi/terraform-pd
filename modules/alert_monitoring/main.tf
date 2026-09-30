@@ -144,7 +144,7 @@ resource "aws_cloudwatch_metric_alarm" "api_errors" {
 
 resource "aws_cloudwatch_metric_alarm" "waf_blocked" {
   alarm_name        = "${var.name}-waf-blocked-requests"
-  alarm_description = "WAF blocked requests to the ingest API (403, not retried by Alertmanager). Check the allow-list against the senders' NAT IPs."
+  alarm_description = "WAF blocked requests to the ingest API (403, not retried by Alertmanager). Check the allow-list against the central egress IPs."
   namespace         = "AWS/WAFV2"
   metric_name       = "BlockedRequests"
   dimensions = {

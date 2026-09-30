@@ -21,7 +21,7 @@ variable "public_zone_name" {
 variable "alert_sources" {
   description = <<-EOT
     Alert sources keyed by the name used in the URL path (/v1/alerts/<name>) and in the token secret.
-    egress_cidrs are the public NAT egress IPs of the source's EKS VPC (WAF / resource policy allow-list).
+    egress_cidrs are the public IPs of the central egress behind the shared transit gateway that the source's EKS uses (WAF / resource policy allow-list); prod and management share them, so the per-source token is the real control.
   EOT
   type = map(object({
     egress_cidrs = list(string)

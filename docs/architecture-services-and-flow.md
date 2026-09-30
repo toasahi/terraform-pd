@@ -1,6 +1,7 @@
 # 利用サービスとアラート通知までの流れ（フェーズ 1 東京 MVP）：Keep ソースでの裏取りと裁定
 
 - 作成日: 2026-09-27
+- 更新: 2026-09-30 外向き通信を Regional NAT から共有 Transit Gateway 経由に変更（§1、§2、§3.1、§3.4、§5.2 U7、G7。計画書 §6.1、§14 U16・R6・R7）
 - 位置づけ: [`implementation-plan.md`](implementation-plan.md)（以下「計画書」）§3・§4 の構成を、サービスごとと流れごとに並べ直す。Keep に依存する前提は、同梱の Keep ソース（`keep/`、keephq/keep 0.54.3、`keep/pyproject.toml:3`）で裏取りし、最後に裁定する。作る理由と背景は [`why-keep.md`](why-keep.md) にある。
 - 引用の書き方:
   - リポジトリ内のファイルは、ルートからの相対パスと行番号で書く（例：`keep/keep/api/routes/alerts.py:748-781`、`lambda/src/handlers/router.ts:31-60`）。`keep/` 以下は上流のソースで、編集しない。
@@ -12,7 +13,7 @@
 
 ## 1. 要約
 
-- 利用サービスは 3 群に分かれる。受信と配送（Route 53、WAF、API Gateway REST、Lambda ×4、DynamoDB、SQS FIFO、SNS）、Keep 基盤（ECS Fargate、internal ALB、RDS、ElastiCache Valkey、Secrets Manager）、共通基盤（VPC と Regional NAT、ECR、CloudWatch、KMS、S3）である（§3）。
+- 利用サービスは 3 群に分かれる。受信と配送（Route 53、WAF、API Gateway REST、Lambda ×4、DynamoDB、SQS FIFO、SNS）、Keep 基盤（ECS Fargate、internal ALB、RDS、ElastiCache Valkey、Secrets Manager）、共通基盤（VPC と共有 Transit Gateway への既定ルート、ECR、CloudWatch、KMS、S3）である（§3）。
 - critical は router から内製ツール用 SQS と SNS に直接送り、Keep を通らない。critical 以外は、Keep のワークフローが SQS 経由で内製ツールに送る（§4）。
 - Keep ソースで C1〜C16 を確かめた。push API、認証、fingerprint の上書き、severity の境界、重複の扱い、SQS FIFO の属性は設計どおりだった。計画書 §14 の U1〜U4、U8、U11〜U14 は解消または縮小した（§5）。
 - 一方で、Keep の設定と監視に 12 件のずれ（G1〜G12）があり、critical の router にも 1 件のずれ（G13：内製ツール用キューへの送信が失敗すると SNS にも送らない）がある。G11（`AWS_KMS_KEY_ID` が未設定だと Keep の secret 作成が失敗する）は、API キーの発行とプロバイダの登録を止める（§6）。
@@ -49,13 +50,14 @@ flowchart LR
     QNC["keep-non-critical-inhouse.fifo"]
   end
   subgraph FDR["foundation ルート"]
-    NAT["Regional NAT<br/>EIP 固定"]
+    RTB["private ルートテーブル<br/>0.0.0.0/0 → TGW"]
   end
+  EGR["共有 Transit Gateway → 集約出口<br/>ネットワーク側"]
   TOOL["内製ツール λ"]
   MAIL["メール購読者"]
 
-  AMP -->|"HTTPS + Bearer"| R53
-  AMM -->|"HTTPS + Bearer"| R53
+  AMP -->|"HTTPS + Bearer<br/>集約出口経由"| R53
+  AMM -->|"HTTPS + Bearer<br/>集約出口経由"| R53
   R53 --> WAF --> GW
   GW -.->|"認可"| AUTH
   GW -->|"プロキシ統合"| ING
@@ -70,12 +72,13 @@ flowchart LR
   KAPI -->|"ARQ ジョブ"| VK --> KARQ
   KARQ --> RDS
   KARQ -->|"critical 以外"| QNC --> TOOL
-  KARQ -.->|"SQS, STS, Secrets Manager"| NAT
-  DSP -.->|"Secrets Manager"| NAT
+  KARQ -.->|"SQS, STS, Secrets Manager"| RTB
+  DSP -.->|"Secrets Manager"| RTB
+  RTB -.-> EGR
 ```
 
-- 実線は通知の流れ、点線は状態の記録と AWS API への出口を表す。Keep から SQS への送信は、インターフェースエンドポイントが無いので NAT を通る（§3.4）。
-- 構成図（PNG）：[`architecture-phase1-tokyo.png`](architecture-phase1-tokyo.png)
+- 実線は通知の流れ、点線は状態の記録と AWS API への出口を表す。Keep から SQS への送信は、インターフェースエンドポイントが無いので、共有 Transit Gateway の先の集約出口を通る（§3.4）。
+- 構成図（PNG）：[`architecture-phase1-tokyo.png`](architecture-phase1-tokyo.png)。図の「Regional NAT + 固定 EIP」は古い内容で、図の更新を待っている（外向き通信は共有 Transit Gateway 経由）。
 
 ## 3. 利用サービス
 
@@ -85,7 +88,7 @@ flowchart LR
 |---|---|---|---|
 | Route 53 | パブリックゾーン（データソース）に、`alerts.<zone>`（API Gateway のカスタムドメイン）と `keep.<zone>` / `keep-api.<zone>`（internal ALB。private IP を返す）の A エイリアス、ACM の検証レコードを作る | `envs/management/ap-northeast-1/alert-pipeline/ingress.tf:1-4`、`modules/alert_ingress/domain.tf:10-21,46-56`、`modules/keep_platform/load_balancer.tf:25-36,129-141` | 送信元の URL を変えずに、フェーズ 3 でフェイルオーバーレコードに置き換えられる（計画書 §13） |
 | ACM ×2 | `alerts.<zone>` 用（API Gateway）と、`keep.<zone>` + `keep-api.<zone>`（SAN）用（ALB）。DNS 検証 | `modules/alert_ingress/domain.tf:1-26`、`modules/keep_platform/load_balancer.tf:15-41` | TLS の終端（計画書 §4、§8） |
-| WAF v2（REGIONAL） | 既定は BLOCK。送信元 NAT の IP セットだけ ALLOW。マネージドルールとレート制限は既定で COUNT。REST API のステージに関連付ける | `modules/alert_ingress/waf.tf:7-12,22-28,134-137` | Alertmanager は 4xx を再試行しないので、誤検知しうるルールは COUNT にする（計画書 §9、§2.2 事実 E・J） |
+| WAF v2（REGIONAL） | 既定は BLOCK。送信元が通る集約出口の IP セット（本番と管理は同じ IP）だけ ALLOW。マネージドルールとレート制限は既定で COUNT。REST API のステージに関連付ける | `modules/alert_ingress/waf.tf:7-12,22-28,134-137` | Alertmanager は 4xx を再試行しないので、誤検知しうるルールは COUNT にする（計画書 §9、§2.2 事実 E・J） |
 | API Gateway REST（Regional） | `POST /v1/alerts/{source}`。REQUEST オーソライザ、リソースポリシー（NotIpAddress で Deny）、execute-api エンドポイントの無効化、アクセスログ | `modules/alert_ingress/main.tf:7-21,23-57,77-105,146-172` | WAF を関連付けられるのは REST API のステージだけ（計画書 §2.2 事実 J） |
 | Lambda ×4（`nodejs24.x` / arm64） | authorizer（10 秒）、ingest（29 秒）、router（30 秒。ESM のバッチ 10、最大同時 10）、dispatcher（60 秒。VPC 内、ESM のバッチ 5、最大同時は `dispatcher_maximum_concurrency` で既定 3、予約同時実行数 3） | `envs/management/ap-northeast-1/alert-pipeline/functions.tf:6-11,23-37,53-68,109-137,173-210` | 計画書 §7。dispatcher の同時実行数で Keep への流量を抑える（計画書 §2.2 事実 F） |
 | DynamoDB | `AlertEventJournal`。`transition_id` をキーに条件付きで書き、状態は前進だけ。TTL、GSI `state-updated_at`、Streams（NEW_AND_OLD_IMAGES）、PITR、削除保護 | `modules/alert_journal/main.tf:9-67`、`lambda/src/lib/journal.ts:15,70-138` | 冪等性と再処理の拠り所（計画書 §4、§13） |
@@ -93,15 +96,15 @@ flowchart LR
 | SNS | `alert-pipeline-critical-direct`（alias/aws/sns、メール購読）と、監視用の `alert-pipeline-alarms`（KMS の CMK で暗号化） | `envs/management/ap-northeast-1/alert-pipeline/main.tf:87-98`、`modules/alert_monitoring/main.tf:38-49` | critical を Keep に依存せず並行して送る（計画書 §4.1 案 A）。パイプライン自体の監視通知（計画書 §10） |
 | KMS | 監視トピック用の CMK（キーのローテーション有効）。そのほかは AWS マネージドキー | `modules/alert_monitoring/main.tf:8-36` | CMK はここだけ。ログや Secrets の CMK 化はフェーズ 2（計画書 §9） |
 | Secrets Manager | `alert-pipeline/source-token-digests`（運用者が digest を書く）、`keep/` 配下の生成値 4 つ（write-only で生成）、`keep/api-key-dispatcher`（運用者が書く）。Keep 自身も `keep_*` / `keep-*` を作る（C7） | `envs/management/ap-northeast-1/alert-pipeline/main.tf:100-105`、`modules/keep_platform/secrets.tf:5-26` | 秘密値を plan と state に残さない（計画書 §5、§8） |
-| VPC、private サブネット、IGW、Regional NAT + EIP、ゲートウェイエンドポイント（s3、dynamodb）、フローログ | Keep と dispatcher の置き場所。インターフェースエンドポイントは無いので、Secrets Manager、SQS、SNS、STS、CloudWatch Logs、ECR API への通信は NAT を通る | `modules/network/main.tf:3-11,18-37,42-71,94-105`、`modules/network/variables.tf:33-37`、`modules/network/flow_logs.tf:46-53` | egress IP を固定し、外部の許可リストに登録できる（計画書 §6.1） |
-| ECR | `keep/keep-api`、`keep/keep-ui`（IMMUTABLE、KMS、スキャン） | `modules/container_registry/main.tf:3-16`、`envs/management/ap-northeast-1/foundation/main.tf:12-16` | 上流の GAR は ECR のプルスルーキャッシュの対象外（計画書 §2.2 事実 G） |
+| VPC、private サブネット、private ルートテーブル（0.0.0.0/0 → 共有 Transit Gateway）、ゲートウェイエンドポイント（s3、dynamodb）、フローログ | Keep と dispatcher の置き場所。インターフェースエンドポイントは無いので、Secrets Manager、SQS、SNS、STS、CloudWatch Logs、ECR API への通信は集約出口を通る | `modules/network/main.tf:3-11,18-37,39-75,84-95`、`modules/network/variables.tf:33-37`、`modules/network/flow_logs.tf:46-53` | IGW、NAT、EIP を持たず、外向き通信をネットワーク側の集約出口にまとめる（計画書 §6.1）。0.0.0.0/0 → Transit Gateway は、Transit Gateway 側のルートテーブルにあるほかの VPC やオンプレミスにも届きうる（逆向きも。受け口は SG で制限）。到達範囲は未確認で、このアタッチメント専用のルートテーブル（集約出口への既定ルート、`operator_cidrs` への戻り、私設アドレスのブラックホールルートだけ）をネットワーク側に依頼する。専用のルートテーブルだけでは、私設アドレス宛てが集約出口の VPC で折り返してほかの VPC に届きうるので、ブラックホールルートが要る（代わりに集約出口の側で落とす案は未確認。計画書 §14 R7） |
+| ECR | `keep/keep-api`、`keep/keep-ui`（IMMUTABLE、KMS、スキャン） | `modules/container_registry/main.tf:3-16`、`envs/management/ap-northeast-1/foundation/main.tf:13-17` | 上流の GAR は ECR のプルスルーキャッシュの対象外（計画書 §2.2 事実 G） |
 | ECS Fargate | クラスタ `keep`（Container Insights enhanced）。サービスは api（既定 2 タスク）、任意の scheduler（1 タスク、min 0% / max 100%）、ui（1 タスク） | `modules/keep_platform/main.tf:52-69`、`modules/keep_platform/services.tf:1-31,42-120,124-187` | 計画書 §8 |
 | ALB（internal） | HTTPS 443（`ELBSecurityPolicy-TLS13-1-2-2021-06`）。ホスト名で振り分ける：`keep-api.<zone>` → api:8080（ヘルスチェック `/healthcheck`、200）、`keep.<zone>` → ui:3000（`/`、200-399） | `modules/keep_platform/load_balancer.tf:5-13,43-127` | UI と API を外部に公開しない（計画書 §8） |
 | RDS for PostgreSQL 17 | Keep の状態（アラート、ワークフロー、実行履歴）。Multi-AZ、`rds.force_ssl=1`、削除保護 | `modules/keep_platform/data_stores.tf:8-61` | フェーズ 3 のクロスリージョンレプリカの元（計画書 §8） |
 | ElastiCache（Valkey 8.0） | Keep の ARQ キュー。2 ノード、自動フェイルオーバー、保存時の暗号化。通信の暗号化は無効 | `modules/keep_platform/data_stores.tf:70-91` | `REDIS=true` で push を非同期に処理する（C1、計画書 §8） |
 | CloudWatch（Logs、アラーム） | Lambda、API Gateway、WAF、ECS コンテナのログ。アラームはキューの滞留 ×4、DLQ ×4、Lambda の Errors ×4、dispatcher の Throttles、API の 4XX / 5XX、WAF のブロック、ECS の稼働タスク数 | `modules/alert_monitoring/main.tf:55-181`、`envs/management/ap-northeast-1/alert-pipeline/monitoring.tf:1-41`、`modules/keep_platform/services.tf:33-38` | 監視する側の監視（計画書 §10）。不足は G3、G12 |
 | X-Ray | API ステージのトレース | `modules/alert_ingress/main.tf:150` | 受信口の遅延の調査 |
-| STS | Keep の amazonsqs プロバイダが、登録時の検証で `GetCallerIdentity` を呼ぶ。NAT 経由 | `keep/keep/providers/amazonsqs_provider/amazonsqs_provider.py:180-198` | Terraform では定義しない。インターフェースエンドポイントが無いので NAT が要る |
+| STS | Keep の amazonsqs プロバイダが、登録時の検証で `GetCallerIdentity` を呼ぶ。共有 Transit Gateway の先の集約出口を通る | `keep/keep/providers/amazonsqs_provider/amazonsqs_provider.py:180-198` | Terraform では定義しない。インターフェースエンドポイントが無いので、共有 Transit Gateway への既定ルートが要る |
 | S3 | tfstate バケット（`use_lockfile`） | `envs/management/ap-northeast-1/bootstrap/main.tf:4-10`、`envs/management/ap-northeast-1/backend.hcl` | 計画書 §5 |
 | IAM | Lambda ごとのインラインポリシー、ECS の実行ロール（注入する secret だけ読む）、タスクロール（Keep の secret と送信専用の SQS） | `envs/management/ap-northeast-1/alert-pipeline/functions.tf:16-21,41-51,72-107,156-171`、`modules/keep_platform/iam.tf:20-95` | 最小権限（計画書 §9）。過剰な点は G5 |
 
@@ -127,7 +130,7 @@ api の各タスクは `keep-backend` コンテナ 1 つで、次の要素がそ
 
 | 関係者 | 役割 | 定義・根拠 | 備考 |
 |---|---|---|---|
-| Alertmanager（本番 EKS、管理 EKS） | webhook（v4）を `Authorization: Bearer` 付きで送る。`send_resolved: true`。5xx だけ再試行し、429 を含む 4xx は再試行しない | `docs/alertmanager-receiver.md:37-59`、計画書 §2.2 事実 E | receiver の追加は計画書 §6.2 の順 6。PagerDuty 用の receiver は残す |
+| Alertmanager（本番 EKS、管理 EKS） | webhook（v4）を `Authorization: Bearer` 付きで送る。`send_resolved: true`。5xx だけ再試行し、429 を含む 4xx は再試行しない | `docs/alertmanager-receiver.md:39-61`、計画書 §2.2 事実 E | receiver の追加は計画書 §6.2 の順 6。PagerDuty 用の receiver は残す |
 | 内製ツール λ | `critical-inhouse.fifo` と `keep-non-critical-inhouse.fifo` を ESM で消費し、`labels.system` でルームを決める（無ければフォールバック） | `docs/critical-notification-contract.md:47,58-59`、`docs/non-critical-notification-contract.md:57-75` | 別リポジトリ。重複は `transitionId` / 重複排除キーで除く |
 | メール購読者 | SNS critical-direct のメールを受ける | `envs/management/ap-northeast-1/alert-pipeline/main.tf:92-98` | critical の並行経路 |
 | 運用者 | internal ALB 経由の Keep UI で手作業（API キー、プロバイダ、ワークフロー）を行う。トークンの digest 登録、DLQ の redrive も行う | `envs/management/ap-northeast-1/keep/main.tf:26-27`、README の適用手順 4〜9 | 手作業 4 / 4a は G11 で止まる |
@@ -139,7 +142,7 @@ api の各タスクは `keep-backend` コンテナ 1 つで、次の要素がそ
 |---|---|---|
 | Keep の pull（プロバイダからの定期取得） | push だけにする。pull はワークフローを通らない | `modules/keep_platform/main.tf:28-29`（`KEEP_PULL_DATA_ENABLED=false`） |
 | Pusher / websocket | サーバを置かない。UI の自動更新は無くなるが、UI は動く。無効化の設定は G7 | `keep/keep/api/core/dependencies.py:52-65`、`keep/keep-ui/utils/hooks/usePusher.ts:15-20` |
-| インターフェース VPC エンドポイント | ゲートウェイエンドポイント（s3、dynamodb）だけを置く。ほかの AWS API は NAT 経由 | `modules/network/main.tf:94-98`、`modules/network/variables.tf:33-37` |
+| インターフェース VPC エンドポイント | ゲートウェイエンドポイント（s3、dynamodb）だけを置く。ほかの AWS API は集約出口経由 | `modules/network/main.tf:84-88`、`modules/network/variables.tf:33-37` |
 | SNS FIFO、EventBridge | 2 経路の独立と順序のため（計画書 §4.1 案 B / D） | 計画書 §4.1 |
 | PagerDuty の SNS 連携 | 選択肢に入れない | 計画書 §15 付記 |
 
@@ -276,7 +279,7 @@ sequenceDiagram
 | U4 | 解消 | C7。IaC 自身の `keep/` 配下にも一致する（G5）。新規作成には `AWS_KMS_KEY_ID` が要る（G11） |
 | U5 | 変わらず | ソースからは判断できない。ミラー時にイメージのマニフェストで確認する |
 | U6 | 変わらず | AWS 側の事項。初回の apply で確認する |
-| U7 | 変わらず | AWS 側の事項。初回の apply で確認する |
+| U7 | 対象外 | Regional NAT を使わなくなった（計画書 §14 U7） |
 | U8 | 解消 | C1 |
 | U9 | 変わらず | v4 本文の入手待ち |
 | U10 | 変わらず | 内製ツール側の事項 |
@@ -397,7 +400,7 @@ sequenceDiagram
 - バックエンドは `server_jobs_bg.py` が 1 時間ごとに、稼働時間と件数（テナント、プロバイダ、ユーザー、24 時間のアラート数など）を PostHog に送る（`keep/keep/server_jobs_bg.py:30-32`、`keep/keep/api/core/report_uptime.py:16,21-60`、`keep/keep/api/core/db.py:5651-5681`）。`POSTHOG_DISABLED` の既定値を決める `posthog.py`（`keep/keep/api/core/` 配下）は、上流の `.gitignore` の対象で同梱ツリーに無い（`keep/.gitignore:230`）ため、既定値は未確認である。
 - `KEEP_PLATFORM_URL` の既定は `https://platform.keephq.dev` で、UI へのリンクに使う（`keep/keep/api/routes/workflows.py:74`、`keep/keep/api/routes/alerts.py:462-466`、`keep/keep/workflowmanager/workflowscheduler.py:740-743`）。
 
-**影響**：管理アカウントから NAT 経由で、keephq の PostHog / Sentry に利用情報が送られうる。ブラウザは `wss://localhost:6001` への接続を試み続ける。Keep が作るリンクが keephq の URL になる。
+**影響**：管理アカウントから集約出口経由で、keephq の PostHog / Sentry に利用情報が送られうる。ブラウザは `wss://localhost:6001` への接続を試み続ける。Keep が作るリンクが keephq の URL になる。
 
 **是正案**：UI に `PUSHER_DISABLED=true`、`POSTHOG_DISABLED=true`、`SENTRY_DISABLED=true` を、バックエンドに `POSTHOG_DISABLED=true`、`PUSHER_DISABLED=true`、`KEEP_PLATFORM_URL=https://keep.<zone>` を設定する。バックエンドの既定値は、初回構築時に `Uptime reported to PostHog.` のログ（`keep/keep/api/core/report_uptime.py:50`）が出ないことで確かめる。
 
@@ -468,7 +471,7 @@ sequenceDiagram
 **事実**
 - router と dispatcher は、レコード単位の失敗を `batchItemFailures` として返し、呼び出し自体は成功で終わる（`lambda/src/lib/fifo-batch.ts:12-28`）。ハンドララッパーが再送出するのは Effect の失敗だけで（`lambda/src/runtime/handler.ts:13-27`）、テストもこの動きを確かめている（`lambda/test/router-dispatcher.test.ts:81-98,139-145`）。
 - `*-errors` は Lambda の `Errors` メトリクスを見る（`modules/alert_monitoring/main.tf:91-107`）。レコード単位の失敗を検知できるのは、キューの滞留（alerts 300 秒、keep-delivery 900 秒。`envs/management/ap-northeast-1/alert-pipeline/monitoring.tf:8-9`）と DLQ だけである。
-- `docs/critical-notification-contract.md:73` と `docs/implementation-plan.md:304`（R3）は、`router-errors` で検知すると書いている。
+- `docs/critical-notification-contract.md:73` と `docs/implementation-plan.md:308`（R3）は、`router-errors` で検知すると書いている。
 - router は内製ツール用キュー → SNS の順に送る（`lambda/src/handlers/router.ts:35-45`）。内製ツール用キューへの送信が失敗し続けると、同じレコードの SNS も送られず、critical はどちらの経路にも届かない。これは critical の配送そのものに関わるので、G13 で扱う。G12 は、この失敗を含むレコード単位の送信失敗に気づくのが遅れる点だけを扱う。
 - 部分バッチ応答を AWS が `Errors` に数えるかは、AWS のドキュメントを取得できず未確認である。GameDay の完了条件 8(c) で確かめる。
 
@@ -476,7 +479,7 @@ sequenceDiagram
 
 **是正案**：router と dispatcher のロググループに、`record failed; failing the rest of the batch`（`lambda/src/lib/fifo-batch.ts:20`）のメトリクスフィルタとアラームを足す。上記 2 か所の記述を直す。
 
-**触るファイル**：`modules/alert_monitoring/main.tf`、`modules/alert_monitoring/variables.tf`、`envs/management/ap-northeast-1/alert-pipeline/monitoring.tf`、`envs/management/ap-northeast-1/alert-pipeline/tests`、`docs/critical-notification-contract.md:73`、`docs/implementation-plan.md:304`
+**触るファイル**：`modules/alert_monitoring/main.tf`、`modules/alert_monitoring/variables.tf`、`envs/management/ap-northeast-1/alert-pipeline/monitoring.tf`、`envs/management/ap-northeast-1/alert-pipeline/tests`、`docs/critical-notification-contract.md:73`、`docs/implementation-plan.md:308`
 
 **承認**：通常の `/develop`
 
@@ -486,7 +489,7 @@ sequenceDiagram
 - router は critical の 2 経路を、内製ツール用キュー → SNS の順に 1 つずつ送り、送れた経路ごとに Journal に記録する（`lambda/src/handlers/router.ts:31-46`）。内製ツール用キューへの SendMessage が失敗すると、その時点でレコードの処理が失敗し、SNS の Publish は試みない。そのレコード以降のバッチも失敗として返る（`lambda/src/lib/fifo-batch.ts:17-24`）。
 - 逆の向き（SNS の失敗）では、内製ツール用キューへの送信と記録が済んでいるので、内製ツールには届く。テストはこの向きだけを確かめている（`lambda/test/router-dispatcher.test.ts:81-98`）。内製ツール Lambda の停止では、キューへの送信は成功するので SNS には届く（§4.4）。
 - 内製ツール用キューへの送信が失敗する例は、router ロールの `sqs:SendMessage` の欠落（`envs/management/ap-northeast-1/alert-pipeline/functions.tf:83-86`）、既存のキューが SSE-KMS で `inhouse_notifier_kms_key_arn` が誤っている場合（`envs/management/ap-northeast-1/alert-pipeline/functions.tf:88-95`）、キューの削除や URL の誤りである。
-- 次の記述は、どちらの向きでも片方の経路が落ちてももう片方で届く、としている：`docs/critical-notification-contract.md:10`（内製チームとの契約）、`docs/implementation-plan.md:113`（§4.1 案 A）、`docs/implementation-plan.md:269`（§12 の完了条件 8）、`docs/implementation-plan.md:304`（§14 R3 の影響）、`docs/implementation-plan.md:317`（§15 の条件 5）。完了条件 8 の (b)(c) は、内製ツール用キューへの送信を失敗させない。
+- 次の記述は、どちらの向きでも片方の経路が落ちてももう片方で届く、としている：`docs/critical-notification-contract.md:10`（内製チームとの契約）、`docs/implementation-plan.md:115`（§4.1 案 A）、`docs/implementation-plan.md:273`（§12 の完了条件 8）、`docs/implementation-plan.md:308`（§14 R3 の影響）、`docs/implementation-plan.md:324`（§15 の条件 5）。完了条件 8 の (b)(c) は、内製ツール用キューへの送信を失敗させない。
 
 **影響**：内製ツール用キューに送れない間、critical は内製ツールにもメールにも届かない。180 秒ごとの再配信を 5 回受けた後（約 15 分）、alerts の DLQ に入る。気づけるのは `alerts-oldest-message-age` と `alerts-dlq-not-empty` だけで、`router-errors` は鳴らない見込みである（G12）。
 
@@ -520,7 +523,7 @@ sequenceDiagram
 | F15 | （C16） | `modules/keep_platform/variables.tf`（`api_extra_environment` に `AUTH_TYPE`、`KEEP_ALLOW_MESH_ALERT_INGESTION`、`KEEP_CLOUDWATCH_DISABLE_API_KEY`、`KEEP_IMPERSONATION_ENABLED`、`KEEP_NO_AUTH_METRICS` のキーがあれば値にかかわらず拒否する `validation`。`auth_type` を大文字と小文字を区別せずに許可リスト（`DB` と実際の IdP。`NOAUTH`、`NO_AUTH`、`OAUTH2PROXY` は含めない）で検査する `validation`。description から `OAUTH2PROXY` を外す）、`modules/keep_platform/tests/keep.tftest.hcl`（両方の拒否と許可） | なし（通常の `/develop`） |
 
 - 各 F を反映するまで、本書は計画書 §4.2（`CONSUMER`）、§8（scheduler とレート制限）、§12 の完了条件 6、§15 の条件 3、`docs/critical-notification-contract.md:73`、`docs/non-critical-notification-contract.md:87` と食い違う。計画書 §14 の R3 と R5 がこの食い違いを指している。
-- G13 を是正するまで、`docs/critical-notification-contract.md:10`、`docs/implementation-plan.md:113`、`docs/implementation-plan.md:269`、`docs/implementation-plan.md:304`、`docs/implementation-plan.md:317` の、片方の経路が落ちてももう片方で届く、という記述は、内製ツール用キューへの送信が失敗する向きでは成り立たず、本書と食い違う。計画書 §14 の R5 がこの食い違いを指している。
+- G13 を是正するまで、`docs/critical-notification-contract.md:10`、`docs/implementation-plan.md:115`、`docs/implementation-plan.md:273`、`docs/implementation-plan.md:308`、`docs/implementation-plan.md:324` の、片方の経路が落ちてももう片方で届く、という記述は、内製ツール用キューへの送信が失敗する向きでは成り立たず、本書と食い違う。計画書 §14 の R5 がこの食い違いを指している。
 
 ## 7. 裁定
 

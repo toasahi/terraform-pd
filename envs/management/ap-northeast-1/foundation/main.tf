@@ -4,9 +4,10 @@
 module "network" {
   source = "../../../../modules/network"
 
-  name            = var.name
-  cidr_block      = var.vpc_cidr_block
-  private_subnets = var.private_subnets
+  name               = var.name
+  cidr_block         = var.vpc_cidr_block
+  private_subnets    = var.private_subnets
+  transit_gateway_id = var.transit_gateway_id
 }
 
 module "container_registry" {
